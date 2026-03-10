@@ -64,6 +64,40 @@ private final class XPCReplyBox: @unchecked Sendable {
     }
 }
 
+private final class PersistentXPCConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connection: NSXPCConnection?
+
+    func current() -> NSXPCConnection? {
+        lock.lock()
+        defer { lock.unlock() }
+        return connection
+    }
+
+    func store(_ connection: NSXPCConnection) {
+        lock.lock()
+        self.connection = connection
+        lock.unlock()
+    }
+
+    func invalidateAndClear() {
+        lock.lock()
+        let connection = self.connection
+        self.connection = nil
+        lock.unlock()
+        connection?.invalidate()
+    }
+}
+
+struct LocalTransportDescriptor: Codable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        case http
+    }
+
+    var kind: Kind
+    var url: URL
+}
+
 /// Hosts an anonymous XPC listener. Used for in-process communication (e.g., tests).
 /// The `endpoint` can be passed directly to `WizmacXPCClient(endpoint:)`.
 public final class WizmacXPCListenerHost: NSObject, @unchecked Sendable {
@@ -104,28 +138,35 @@ public enum WizmacLocalService {
 }
 
 /// Sends JSON-RPC requests to the Wizmac service.
-/// - Production: uses HTTP to `WizmacLocalService.url`
-/// - Tests: uses a directly provided `NSXPCListenerEndpoint`
+/// - Production: uses a transport descriptor file for local discovery and falls back to localhost HTTP.
+/// - Tests: can use a directly provided `NSXPCListenerEndpoint` for direct XPC round-trips.
 public actor WizmacXPCClient {
     private let localURL: URL?
+    private let endpointFileURL: URL?
     private let directEndpoint: NSXPCListenerEndpoint?
     private let processManager: WizmacServiceProcessManager?
+    private let persistentConnectionBox = PersistentXPCConnectionBox()
 
-    /// Production init: connects via local HTTP.
     public init(
         localURL: URL = WizmacLocalService.url,
+        endpointFileURL: URL? = LocalWizmacServiceConfiguration.endpointFileURL,
         processManager: WizmacServiceProcessManager? = nil
     ) {
         self.localURL = localURL
+        self.endpointFileURL = endpointFileURL
         self.directEndpoint = nil
         self.processManager = processManager
     }
 
-    /// Test init: connects using a directly provided in-process XPC endpoint.
     public init(endpoint: NSXPCListenerEndpoint) {
         self.localURL = nil
+        self.endpointFileURL = nil
         self.directEndpoint = endpoint
         self.processManager = nil
+    }
+
+    deinit {
+        persistentConnectionBox.invalidateAndClear()
     }
 
     public func send(
@@ -149,10 +190,56 @@ public actor WizmacXPCClient {
             return try await sendXPC(request: request, source: source, endpoint: direct)
         }
 
+        if let descriptor = loadTransportDescriptorFromDisk() {
+            return try await send(request: request, source: source, using: descriptor)
+        }
+
         guard let url = localURL else {
             throw ControlPlaneError.unsupported("No Wizmac service transport configured.")
         }
         return try await sendHTTP(request: request, source: source, to: url)
+    }
+
+    private func send(
+        request: JSONRPCRequest,
+        source: ControlPlaneSource,
+        using descriptor: LocalTransportDescriptor
+    ) async throws -> JSONRPCResponse {
+        switch descriptor.kind {
+        case .http:
+            return try await sendHTTP(request: request, source: source, to: descriptor.url)
+        }
+    }
+
+    private func resetPersistentConnection() {
+        persistentConnectionBox.invalidateAndClear()
+    }
+
+    private func loadTransportDescriptorFromDisk() -> LocalTransportDescriptor? {
+        guard let endpointFileURL else { return nil }
+        guard let data = try? Data(contentsOf: endpointFileURL) else { return nil }
+        return try? JSONDecoder().decode(LocalTransportDescriptor.self, from: data)
+    }
+
+    private func ensurePersistentConnection(endpoint: NSXPCListenerEndpoint) -> NSXPCConnection {
+        if let persistentConnection = persistentConnectionBox.current() {
+            return persistentConnection
+        }
+
+        let connection = NSXPCConnection(listenerEndpoint: endpoint)
+        connection.remoteObjectInterface = NSXPCInterface(with: WizmacXPCServiceProtocol.self)
+        connection.resume()
+        persistentConnectionBox.store(connection)
+        return connection
+    }
+
+    private func sendXPCPersistent(
+        request: JSONRPCRequest,
+        source: ControlPlaneSource,
+        endpoint: NSXPCListenerEndpoint
+    ) async throws -> JSONRPCResponse {
+        let connection = ensurePersistentConnection(endpoint: endpoint)
+        return try await send(request: request, source: source, using: connection)
     }
 
     private func sendXPC(
@@ -165,6 +252,14 @@ public actor WizmacXPCClient {
         connection.resume()
         defer { connection.invalidate() }
 
+        return try await send(request: request, source: source, using: connection)
+    }
+
+    private func send(
+        request: JSONRPCRequest,
+        source: ControlPlaneSource,
+        using connection: NSXPCConnection
+    ) async throws -> JSONRPCResponse {
         let requestData = try JSONEncoder().encode(request)
         let sourceData = try JSONEncoder().encode(source)
 

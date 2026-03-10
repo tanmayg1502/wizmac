@@ -1122,6 +1122,7 @@ public final class WizmacServiceHost: @unchecked Sendable {
     private let runtime: WizmacServiceRuntime
     private let dispatcher: ControlPlaneDispatcher
     private var localServer: HTTPJSONRPCServer?
+    private var localXPCListener: WizmacXPCListenerHost?
     private var remoteServer: HTTPJSONRPCServer?
     private var remoteServerSignature: RemoteServerSignature?
 
@@ -1141,6 +1142,14 @@ public final class WizmacServiceHost: @unchecked Sendable {
         let server = HTTPJSONRPCServer(dispatcher: dispatcher, configuration: localConfig)
         try server.start()
         localServer = server
+
+        let xpcListener = WizmacXPCListenerHost(
+            serviceContract: DispatcherBackedXPCServiceContract(dispatcher: dispatcher)
+        )
+        xpcListener.start()
+        localXPCListener = xpcListener
+        try publishLocalTransportDescriptor()
+
         await runtime.bootstrap()
         do {
             try await syncRemoteServer()
@@ -1236,6 +1245,17 @@ public final class WizmacServiceHost: @unchecked Sendable {
         case .lan, .custom:
             return settings.host
         }
+    }
+
+    private func publishLocalTransportDescriptor() throws {
+        let descriptor = LocalTransportDescriptor(kind: .http, url: WizmacLocalService.url)
+        let data = try JSONEncoder().encode(descriptor)
+        let endpointFileURL = LocalWizmacServiceConfiguration.endpointFileURL
+        try FileManager.default.createDirectory(
+            at: endpointFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: endpointFileURL, options: .atomic)
     }
 }
 

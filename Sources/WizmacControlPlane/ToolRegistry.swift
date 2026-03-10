@@ -51,6 +51,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
                 "debugTimings": .string("boolean"),
+                "adapter": .string("string"),
             ]
         ),
         .schemaBacked(
@@ -68,6 +69,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "includeMenus": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
+                "adapter": .string("string"),
             ],
             requiresConfirmation: true
         ),
@@ -84,6 +86,47 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "snapshotID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "debugTimings": .string("boolean"),
+                "trustedSessionID": .string("string"),
+                "adapter": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ui.capture",
+            title: "Capture UI Graph",
+            description: "Capture a focused-window or app snapshot and return graph/session metadata.",
+            schemaProperties: [
+                "scope": .string("string"),
+                "detail": .string("string"),
+                "pid": .string("number"),
+                "app": .string("string"),
+                "adapter": .string("string"),
+                "debugTimings": .string("boolean"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ui.prefetch",
+            title: "Prefetch UI Graph",
+            description: "Warm the service-owned graph cache for an app or pid before execution.",
+            schemaProperties: [
+                "pid": .string("number"),
+                "app": .string("string"),
+                "scope": .string("string"),
+                "strategy": .string("string"),
+                "adapter": .string("string"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ui.execute",
+            title: "Execute UI Action Batch",
+            description: "Execute a batch of UI actions against a known graph/snapshot in a single round trip.",
+            schemaProperties: [
+                "actions": .string("array"),
+                "graphID": .string("string"),
+                "snapshotID": .string("string"),
+                "stopOnFailure": .string("boolean"),
+                "adapter": .string("string"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ],

@@ -65,6 +65,12 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return await uiActResult(for: request)
         case .uiCopy:
             return await uiCopyResult(for: request)
+        case .uiCapture:
+            return await uiCaptureResult(for: request)
+        case .uiPrefetch:
+            return await uiPrefetchResult(for: request)
+        case .uiExecute:
+            return await uiExecuteResult(for: request)
         case .uiHints:
             return await uiSearchResult(for: request.with(arguments: ["operation": .string("hints")]))
         case .uiDrag:
@@ -304,6 +310,99 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             outcome: .success,
             message: "Found \(searchResult.snapshot.targets.count) UI target(s).",
             payload: payload
+        )
+    }
+
+    private func uiCaptureResult(for request: ActionRequest) async -> ActionResult {
+        let captureRequest = request.with(arguments: [
+            "query": .string(""),
+            "limit": .number(250),
+            "scope": .string(request.string(for: "scope") ?? "focusedWindow"),
+            "includeMenus": .bool(false),
+            "adapter": .string(request.string(for: "adapter") ?? "auto"),
+        ])
+        let search = await uiSearchResult(for: captureRequest)
+        guard search.outcome == .success else { return search }
+        let detail = request.string(for: "detail")?.lowercased() ?? "compact"
+        guard var payload = search.payload?.objectValue else { return search }
+        payload["graphID"] = payload["sessionID"] ?? .null
+        payload["stale"] = .bool(false)
+        payload["engine"] = .string("ax")
+        if detail != "full" {
+            payload["targets"] = .array((payload["targets"]?.arrayValue ?? []).prefix(25).map { $0 })
+        }
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Captured UI state for \(payload["appName"]?.stringValue ?? "frontmost app").",
+            payload: .object(payload)
+        )
+    }
+
+    private func uiPrefetchResult(for request: ActionRequest) async -> ActionResult {
+        let capture = await uiCaptureResult(for: request)
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: capture.outcome,
+            message: capture.outcome == .success ? "Prefetched UI graph cache." : capture.message,
+            payload: capture.payload
+        )
+    }
+
+    private func uiExecuteResult(for request: ActionRequest) async -> ActionResult {
+        guard let actions = request.array(for: "actions"), actions.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Missing actions array."
+            )
+        }
+
+        var results: [JSONValue] = []
+        for step in actions {
+            guard let object = step.objectValue,
+                  let rawTool = object["tool"]?.stringValue,
+                  let action = ActionName(rawValue: rawTool)
+            else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .invalidRequest,
+                    message: "Each action must include a valid tool name."
+                )
+            }
+
+            var args = object["arguments"]?.objectValue ?? [:]
+            if let snapshotID = request.string(for: "snapshotID"), args["snapshotID"] == nil {
+                args["snapshotID"] = .string(snapshotID)
+            }
+            let subRequest = ActionRequest(action: action, arguments: args, origin: request.origin)
+            let subResult = await execute(subRequest)
+            results.append([
+                "tool": .string(rawTool),
+                "outcome": .string(subResult.outcome.rawValue),
+                "message": .string(subResult.message),
+                "payload": subResult.payload ?? .null,
+            ])
+            if request.bool(for: "stopOnFailure") ?? true, subResult.outcome != .success {
+                break
+            }
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Executed \(results.count) batched action(s).",
+            payload: [
+                "graphID": request.arguments["graphID"] ?? .null,
+                "snapshotID": request.arguments["snapshotID"] ?? .null,
+                "results": .array(results),
+                "engine": .string("ax"),
+            ]
         )
     }
 
@@ -983,7 +1082,11 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             "bundleIdentifier": searchResult.snapshot.bundleIdentifier.map(JSONValue.string) ?? .null,
             "windowTitle": searchResult.snapshot.windowTitle.map(JSONValue.string) ?? .null,
             "sessionID": searchResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+            "graphID": searchResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
             "snapshotID": searchResult.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+            "stale": .bool(false),
+            "engine": .string("ax"),
+            "approvalMode": .string("strict"),
             "targets": .array(searchResult.snapshot.targets.map(\.payload)),
         ]
 
@@ -1018,12 +1121,19 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
     private func debugTimingsPayload(searchMetrics: UISessionMetrics?, actionMs: Double) -> JSONValue {
         [
+            "clientProcessMs": .number(0),
             "transportMs": .number(0),
-            "snapshotMs": .number(searchMetrics?.snapshotMs ?? 0),
-            "cacheLookupMs": .number(searchMetrics?.cacheLookupMs ?? 0),
-            "rankingMs": .number(searchMetrics?.rankingMs ?? 0),
-            "actionMs": .number(actionMs),
             "approvalMs": .number(0),
+            "cacheLookupMs": .number(searchMetrics?.cacheLookupMs ?? 0),
+            "snapshotMs": .number(searchMetrics?.snapshotMs ?? 0),
+            "rankingMs": .number(searchMetrics?.rankingMs ?? 0),
+            "graphLookupMs": .number(searchMetrics?.cacheLookupMs ?? 0),
+            "snapshotRefreshMs": .number(searchMetrics?.snapshotMs ?? 0),
+            "routePlanMs": .number(searchMetrics?.rankingMs ?? 0),
+            "actionMs": .number(actionMs),
+            "postActionRefreshMs": .number(0),
+            "engine": .string("ax"),
+            "approvalMode": .string("strict"),
             "cacheHit": .bool(searchMetrics?.cacheHit ?? false),
         ]
     }
