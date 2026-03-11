@@ -251,6 +251,16 @@ protocol AccessibilitySnapshotting {
     func hintSession(query: String?, labelAlphabet: String, limit: Int) -> UIHintSession?
     func hintSession(query: String?, pid: pid_t, labelAlphabet: String, limit: Int) -> UIHintSession?
     func listApplications() -> [RunningAppInfo]
+    func debugDump(
+        targetID: String,
+        pid: pid_t?,
+        labelAlphabet: String,
+        sessionID: String?,
+        snapshotID: String?,
+        scope: UISearchScope,
+        includeMenus: Bool,
+        maxDepth: Int
+    ) -> JSONValue?
 }
 
 extension AccessibilitySnapshotting {
@@ -331,6 +341,18 @@ extension AccessibilitySnapshotting {
         hintSession(query: query, labelAlphabet: labelAlphabet, limit: limit)
     }
     func listApplications() -> [RunningAppInfo] { [] }
+    func debugDump(
+        targetID _: String,
+        pid _: pid_t?,
+        labelAlphabet _: String,
+        sessionID _: String?,
+        snapshotID _: String?,
+        scope _: UISearchScope,
+        includeMenus _: Bool,
+        maxDepth _: Int
+    ) -> JSONValue? {
+        nil
+    }
 }
 
 protocol WindowControlling {
@@ -736,6 +758,188 @@ enum LabelGenerator {
     }
 }
 
+enum AccessibilityTraversalHeuristics {
+    static let visibleRowsAttribute = "AXVisibleRows"
+
+    private static let listLikeRoles: Set<String> = [
+        kAXTableRole as String,
+        kAXListRole as String,
+        "AXOutline",
+        "AXBrowser",
+    ]
+
+    private static let supplementalChildAttributes = [
+        kAXTabsAttribute,
+        kAXColumnsAttribute,
+        kAXContentsAttribute,
+        kAXVisibleChildrenAttribute,
+    ]
+
+    private static let structuralRoleFragments = [
+        "application",
+        "window",
+        "sheet",
+        "scrollarea",
+        "scroll",
+        "group",
+        "list",
+        "outline",
+        "row",
+        "cell",
+        "table",
+        "column",
+        "splitgroup",
+        "browser",
+    ]
+
+    static func isListLikeRole(_ role: String) -> Bool {
+        listLikeRoles.contains(role)
+    }
+
+    static func orderedChildAttributes(parentRole: String) -> [String] {
+        if isListLikeRole(parentRole) {
+            return [visibleRowsAttribute, kAXRowsAttribute, kAXChildrenAttribute] + supplementalChildAttributes
+        }
+        return [kAXChildrenAttribute] + supplementalChildAttributes
+    }
+
+    static func nextDepth(currentDepth: Int, parentRole: String) -> Int {
+        let loweredRole = parentRole.lowercased()
+        if structuralRoleFragments.contains(where: loweredRole.contains) {
+            return currentDepth
+        }
+        return currentDepth + 1
+    }
+}
+
+enum AXElementValueParser {
+    static func elements(from value: CFTypeRef?) -> [AXUIElement] {
+        guard let value else { return [] }
+        return elements(fromAny: value)
+    }
+
+    private static func elements(fromAny value: Any) -> [AXUIElement] {
+        let object = value as AnyObject
+        if CFGetTypeID(object) == AXUIElementGetTypeID() {
+            return [object as! AXUIElement]
+        }
+
+        if let array = value as? [Any] {
+            return array.flatMap(elements(fromAny:))
+        }
+
+        if let array = value as? NSArray {
+            return array.flatMap(elements(fromAny:))
+        }
+
+        return []
+    }
+}
+
+enum AXDebugValueSerializer {
+    static func jsonValue(from value: CFTypeRef?) -> JSONValue {
+        guard let value else { return .null }
+
+        if let text = value as? String {
+            return .string(text)
+        }
+
+        if let text = value as? NSAttributedString {
+            return .string(text.string)
+        }
+
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            return .number(number.doubleValue)
+        }
+
+        if CFGetTypeID(value) == AXValueGetTypeID() {
+            return serialize(value as! AXValue)
+        }
+
+        if CFGetTypeID(value) == AXUIElementGetTypeID() {
+            var pid: pid_t = 0
+            AXUIElementGetPid(value as! AXUIElement, &pid)
+            return [
+                "type": .string("AXUIElement"),
+                "pid": .number(Double(pid)),
+                "hash": .number(Double(CFHash(value))),
+            ]
+        }
+
+        if let array = value as? [Any] {
+            return .array(array.map(jsonValue(any:)))
+        }
+
+        if let array = value as? NSArray {
+            return .array(array.map(jsonValue(any:)))
+        }
+
+        let typeName = CFCopyTypeIDDescription(CFGetTypeID(value)) as String? ?? String(describing: type(of: value))
+        return [
+            "type": .string(typeName),
+            "description": .string(String(describing: value)),
+        ]
+    }
+
+    private static func jsonValue(any value: Any) -> JSONValue {
+        if value is NSNull {
+            return .null
+        }
+        return jsonValue(from: value as AnyObject)
+    }
+
+    private static func serialize(_ axValue: AXValue) -> JSONValue {
+        switch AXValueGetType(axValue) {
+        case .cgPoint:
+            var point = CGPoint.zero
+            guard AXValueGetValue(axValue, .cgPoint, &point) else { return axValueFallback(axValue) }
+            return [
+                "type": .string("CGPoint"),
+                "x": .number(point.x),
+                "y": .number(point.y),
+            ]
+        case .cgSize:
+            var size = CGSize.zero
+            guard AXValueGetValue(axValue, .cgSize, &size) else { return axValueFallback(axValue) }
+            return [
+                "type": .string("CGSize"),
+                "width": .number(size.width),
+                "height": .number(size.height),
+            ]
+        case .cgRect:
+            var rect = CGRect.zero
+            guard AXValueGetValue(axValue, .cgRect, &rect) else { return axValueFallback(axValue) }
+            return [
+                "type": .string("CGRect"),
+                "x": .number(rect.origin.x),
+                "y": .number(rect.origin.y),
+                "width": .number(rect.width),
+                "height": .number(rect.height),
+            ]
+        case .cfRange:
+            var range = CFRange()
+            guard AXValueGetValue(axValue, .cfRange, &range) else { return axValueFallback(axValue) }
+            return [
+                "type": .string("CFRange"),
+                "location": .number(Double(range.location)),
+                "length": .number(Double(range.length)),
+            ]
+        default:
+            return axValueFallback(axValue)
+        }
+    }
+
+    private static func axValueFallback(_ axValue: AXValue) -> JSONValue {
+        [
+            "type": .string("AXValue"),
+            "axValueType": .number(Double(AXValueGetType(axValue).rawValue)),
+        ]
+    }
+}
+
 enum FuzzyMatcher {
     static func score(query: String, in target: TargetDescriptor) -> Int {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -770,5 +974,145 @@ enum FuzzyMatcher {
         }
 
         return score
+    }
+}
+
+enum SemanticTargetRanker {
+    private struct RankedTarget {
+        let target: TargetDescriptor
+        let score: Int
+        let directMatch: Bool
+        let proximity: Double
+    }
+
+    static func rankedTargets(in snapshot: TargetSnapshot, query: String, limit: Int) -> [TargetDescriptor] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.isEmpty == false else {
+            return Array(snapshot.targets.prefix(limit))
+        }
+
+        let directScores = snapshot.targets.reduce(into: [String: Int]()) { scores, target in
+            let score = FuzzyMatcher.score(query: trimmedQuery, in: target)
+            if score > 0 {
+                scores[target.id] = score
+            }
+        }
+
+        let anchors = snapshot.targets.compactMap { target -> (TargetDescriptor, Int)? in
+            guard let score = directScores[target.id], isTextualAnchor(target) else { return nil }
+            return (target, score)
+        }
+
+        let combinedScores = snapshot.targets.reduce(into: directScores) { scores, target in
+            for (anchor, anchorScore) in anchors {
+                let adjacentScore = adjacentActionScore(candidate: target, anchor: anchor, anchorScore: anchorScore)
+                guard adjacentScore > 0 else { continue }
+                scores[target.id] = max(scores[target.id] ?? 0, adjacentScore)
+            }
+        }
+
+        return snapshot.targets
+            .compactMap { target -> RankedTarget? in
+                guard let score = combinedScores[target.id], score > 0 else { return nil }
+                return RankedTarget(
+                    target: target,
+                    score: score,
+                    directMatch: directScores[target.id] != nil,
+                    proximity: nearestAnchorDistance(for: target, anchors: anchors.map(\.0))
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                if lhs.directMatch != rhs.directMatch {
+                    return lhs.directMatch && !rhs.directMatch
+                }
+                if lhs.proximity != rhs.proximity {
+                    return lhs.proximity < rhs.proximity
+                }
+                return lhs.target.title.localizedCaseInsensitiveCompare(rhs.target.title) == .orderedAscending
+            }
+            .prefix(limit)
+            .map(\.target)
+    }
+
+    private static func adjacentActionScore(candidate: TargetDescriptor, anchor: TargetDescriptor, anchorScore: Int) -> Int {
+        guard candidate.id != anchor.id else { return 0 }
+        guard isAdjacentActionableCandidate(candidate) else { return 0 }
+        guard let candidateFrame = candidate.frame?.cgRect, let anchorFrame = anchor.frame?.cgRect else { return 0 }
+
+        let sharedPrefix = sharedPathPrefixLength(candidate.path, anchor.path)
+        guard sharedPrefix >= 4 else { return 0 }
+
+        let centerYDistance = abs(candidateFrame.midY - anchorFrame.midY)
+        let maxAllowedCenterYDistance = max(candidateFrame.height, anchorFrame.height) * 0.9
+        let verticalOverlap = max(0, min(candidateFrame.maxY, anchorFrame.maxY) - max(candidateFrame.minY, anchorFrame.minY))
+        guard verticalOverlap > 0 || centerYDistance <= maxAllowedCenterYDistance else { return 0 }
+
+        let horizontalGap: CGFloat
+        if candidateFrame.maxX < anchorFrame.minX {
+            horizontalGap = anchorFrame.minX - candidateFrame.maxX
+        } else if anchorFrame.maxX < candidateFrame.minX {
+            horizontalGap = candidateFrame.minX - anchorFrame.maxX
+        } else {
+            horizontalGap = 0
+        }
+        guard horizontalGap <= 120 else { return 0 }
+
+        var score = anchorScore + 40
+        score += min(sharedPrefix, 8) * 4
+        score += verticalOverlap > 0 ? 35 : 15
+        score += max(0, 30 - Int(horizontalGap))
+
+        if candidateFrame.maxX <= anchorFrame.minX || anchorFrame.maxX <= candidateFrame.minX {
+            score += 10
+        }
+
+        let loweredRole = candidate.role.lowercased()
+        if loweredRole.contains("checkbox") {
+            score += 15
+        } else if loweredRole.contains("button") {
+            score += 12
+        } else if loweredRole.contains("image") {
+            score += 8
+        }
+
+        return score
+    }
+
+    private static func isTextualAnchor(_ target: TargetDescriptor) -> Bool {
+        let loweredRole = target.role.lowercased()
+        let searchableText = [target.title, target.subtitle ?? "", target.value ?? ""]
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard searchableText.isEmpty == false else { return false }
+        return loweredRole.contains("text") || loweredRole.contains("row") || loweredRole.contains("cell")
+    }
+
+    private static func isAdjacentActionableCandidate(_ target: TargetDescriptor) -> Bool {
+        let loweredRole = target.role.lowercased()
+        if loweredRole.contains("button") || loweredRole.contains("checkbox") || loweredRole.contains("link") || loweredRole.contains("radio") {
+            return true
+        }
+
+        guard loweredRole.contains("image"), let frame = target.frame else { return false }
+        return max(frame.width, frame.height) <= 44
+    }
+
+    private static func sharedPathPrefixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        zip(lhs, rhs).prefix { $0 == $1 }.count
+    }
+
+    private static func nearestAnchorDistance(for target: TargetDescriptor, anchors: [TargetDescriptor]) -> Double {
+        guard let targetFrame = target.frame?.center else { return .greatestFiniteMagnitude }
+        return anchors.compactMap { anchor -> Double? in
+            guard let anchorFrame = anchor.frame?.center else { return nil }
+            let dx = targetFrame.x - anchorFrame.x
+            let dy = targetFrame.y - anchorFrame.y
+            return Double((dx * dx) + (dy * dy)).squareRoot()
+        }
+        .min() ?? .greatestFiniteMagnitude
     }
 }

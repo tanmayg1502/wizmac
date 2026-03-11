@@ -10,6 +10,83 @@ final class SupportAndControllerTests: XCTestCase {
         XCTAssertEqual(labels.count, 4)
     }
 
+    func testTraversalHeuristicsPreserveDepthForStructuralContainers() {
+        XCTAssertEqual(AccessibilityTraversalHeuristics.nextDepth(currentDepth: 8, parentRole: "AXRow"), 8)
+        XCTAssertEqual(AccessibilityTraversalHeuristics.nextDepth(currentDepth: 8, parentRole: "AXCell"), 8)
+        XCTAssertEqual(AccessibilityTraversalHeuristics.nextDepth(currentDepth: 8, parentRole: "AXButton"), 9)
+    }
+
+    func testTraversalHeuristicsPreferVisibleRowsForListRoles() {
+        XCTAssertEqual(
+            Array(AccessibilityTraversalHeuristics.orderedChildAttributes(parentRole: "AXList").prefix(3)),
+            [AccessibilityTraversalHeuristics.visibleRowsAttribute, kAXRowsAttribute, kAXChildrenAttribute]
+        )
+        XCTAssertTrue(AccessibilityTraversalHeuristics.isListLikeRole("AXOutline"))
+        XCTAssertTrue(AccessibilityTraversalHeuristics.isListLikeRole("AXBrowser"))
+    }
+
+    func testTraversalHeuristicsUseStandardChildrenForNonListRoles() {
+        XCTAssertEqual(
+            AccessibilityTraversalHeuristics.orderedChildAttributes(parentRole: "AXButton"),
+            [kAXChildrenAttribute, kAXTabsAttribute, kAXColumnsAttribute, kAXContentsAttribute, kAXVisibleChildrenAttribute]
+        )
+        XCTAssertFalse(AccessibilityTraversalHeuristics.isListLikeRole("AXButton"))
+    }
+
+    func testAXElementValueParserAcceptsSingletonAndMixedArrays() {
+        let appElement = AXUIElementCreateApplication(getpid())
+        let systemElement = AXUIElementCreateSystemWide()
+
+        XCTAssertEqual(AXElementValueParser.elements(from: appElement).count, 1)
+
+        let mixed: [Any] = ["ignore", appElement, NSNull(), [systemElement]]
+        let decoded = AXElementValueParser.elements(from: mixed as NSArray)
+
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertTrue(CFEqual(decoded[0], appElement))
+        XCTAssertTrue(CFEqual(decoded[1], systemElement))
+    }
+
+    func testSemanticTargetRankerPromotesAdjacentCheckboxForMatchedTaskTitle() {
+        let checkbox = TargetDescriptor(
+            id: "checkbox",
+            appName: "TickTick",
+            role: "AXButton",
+            title: "AXButton",
+            frame: TargetRect(x: 210, y: 158, width: 20, height: 20),
+            path: ["AXWindow", "AXScrollArea[0]", "AXList[0]", "AXOutline[0]", "AXRow[2]", "AXCell[0]", "AXButton[0]"]
+        )
+        let taskTitle = TargetDescriptor(
+            id: "task-title",
+            appName: "TickTick",
+            role: "AXStaticText",
+            title: "_NS:task",
+            value: "Complete the test group project",
+            frame: TargetRect(x: 240, y: 158, width: 170, height: 20),
+            path: ["AXWindow", "AXScrollArea[0]", "AXList[0]", "AXOutline[0]", "AXRow[2]", "AXCell[1]", "AXStaticText[0]"]
+        )
+        let headerButton = TargetDescriptor(
+            id: "header-button",
+            appName: "TickTick",
+            role: "AXButton",
+            title: "AXButton",
+            frame: TargetRect(x: 500, y: 106, width: 26, height: 26),
+            path: ["AXWindow", "AXScrollArea[0]", "AXList[0]", "AXList[1]", "AXGroup[2]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "TickTick",
+            bundleIdentifier: "com.TickTick.task.mac",
+            windowTitle: "TickTick",
+            targets: [headerButton, taskTitle, checkbox]
+        )
+
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "Complete the test group project", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, checkbox.id)
+        XCTAssertTrue(ranked.map(\.id).contains(taskTitle.id))
+        XCTAssertFalse(ranked.map(\.id).contains(headerButton.id))
+    }
+
     func testGlobalInputTranslatorMapsModifiersAndSpecialKey() {
         let modifiers = GlobalInputTranslator.modifiers(from: [.control, .option, .shift])
         let event = GlobalInputTranslator.event(

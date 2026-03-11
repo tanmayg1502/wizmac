@@ -4,6 +4,16 @@ import Foundation
 import WizmacCore
 
 public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
+    private struct SnapshotBuildResult {
+        var snapshot: TargetSnapshot
+        var elementIndex: [String: AXUIElement]
+    }
+
+    private struct CollectedTargets {
+        var targets: [TargetDescriptor]
+        var elementIndex: [String: AXUIElement]
+    }
+
     private struct CachedUISession {
         var id: String
         var processIdentifier: pid_t
@@ -11,6 +21,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         var includeMenus: Bool
         var snapshot: TargetSnapshot
         var targetIndex: [String: TargetDescriptor]
+        var elementIndex: [String: AXUIElement]
         var lastAccessedAt: Date
         var lastRefreshedAt: Date
         var cacheHits: Int
@@ -50,8 +61,8 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         }
     }
 
-    private let maxDepth = 8
-    private let maxNodes = 400
+    private let maxDepth = 15
+    private let maxNodes = 500
     private let maxSessionCount = 5
     private let sessionTTL: TimeInterval = 10
     private let invalidationLock = NSLock()
@@ -68,6 +79,29 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         kAXValueChangedNotification as String,
         kAXSelectedTextChangedNotification as String,
     ]
+    private let traversalAttributes = [
+        kAXRoleAttribute,
+        kAXTitleAttribute,
+        kAXDescriptionAttribute,
+        kAXIdentifierAttribute,
+        kAXValueAttribute,
+        kAXHelpAttribute,
+        kAXPositionAttribute,
+        kAXSizeAttribute,
+        kAXChildrenAttribute,
+        kAXRowsAttribute,
+        kAXTabsAttribute,
+        kAXColumnsAttribute,
+        kAXContentsAttribute,
+        kAXVisibleChildrenAttribute,
+        AccessibilityTraversalHeuristics.visibleRowsAttribute,
+    ]
+    private let debugTraversalElementLimit = 12
+    private let debugChildAttributeExclusions: Set<String> = [
+        kAXParentAttribute as String,
+        kAXWindowAttribute as String,
+        kAXTopLevelUIElementAttribute as String,
+    ]
 
     private var sessionsByID: [String: CachedUISession] = [:]
     private var sessionAccessOrder: [String] = []
@@ -82,8 +116,8 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
     }
 
     public func snapshotFrontmostApplication(labelAlphabet: String) -> TargetSnapshot? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        return snapshotApplication(pid: app.processIdentifier, labelAlphabet: labelAlphabet)
+        guard let pid = resolvePID(nil) else { return nil }
+        return snapshotApplication(pid: pid, labelAlphabet: labelAlphabet)
     }
 
     public func snapshotApplication(pid: pid_t, labelAlphabet: String) -> TargetSnapshot? {
@@ -340,22 +374,67 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         return buildHintSession(query: query, labelAlphabet: labelAlphabet, limit: limit, from: snapshot)
     }
 
+    func debugDump(
+        targetID: String,
+        pid: pid_t?,
+        labelAlphabet: String,
+        sessionID: String?,
+        snapshotID: String?,
+        scope: UISearchScope,
+        includeMenus: Bool,
+        maxDepth: Int
+    ) -> JSONValue? {
+        pruneExpiredSessions()
+
+        guard let resolvedPID = resolvePID(pid) else { return nil }
+        let currentWindowTitle = currentWindowTitle(for: resolvedPID)
+        var cachedSession = loadCachedSession(
+            sessionID: sessionID,
+            pid: resolvedPID,
+            scope: scope,
+            includeMenus: includeMenus,
+            currentWindowTitle: currentWindowTitle
+        )
+
+        if let snapshotID, cachedSession?.snapshot.snapshotID != snapshotID {
+            cachedSession = nil
+        }
+
+        if cachedSession == nil || cachedSession?.elementIndex[targetID] == nil {
+            cachedSession = refreshedSession(
+                existingSessionID: cachedSession?.id ?? sessionID,
+                pid: resolvedPID,
+                labelAlphabet: labelAlphabet,
+                scope: scope,
+                includeMenus: includeMenus
+            )
+        }
+
+        guard var cachedSession,
+              let target = cachedSession.targetIndex[targetID],
+              let element = cachedSession.elementIndex[targetID]
+        else {
+            return nil
+        }
+
+        cachedSession.lastAccessedAt = Date()
+        storeSession(cachedSession)
+
+        return debugDumpPayload(
+            for: element,
+            target: target,
+            session: cachedSession,
+            maxDepth: max(0, maxDepth)
+        )
+    }
+
     private func filteringSnapshot(_ snapshot: TargetSnapshot, query: String, labelAlphabet: String, limit: Int) -> TargetSnapshot {
         var result = snapshot
-        let scored = snapshot.targets
-            .map { ($0, FuzzyMatcher.score(query: query, in: $0)) }
-            .filter { candidate, score in
-                guard score > 0 else { return false }
-                return candidate.frame == nil || isFrameActionable(candidate.frame?.cgRect)
-            }
-            .sorted { lhs, rhs in
-                if lhs.1 == rhs.1 {
-                    return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
-                }
-                return lhs.1 > rhs.1
+        let scored = SemanticTargetRanker.rankedTargets(in: snapshot, query: query, limit: limit * 2)
+            .filter { candidate in
+                candidate.frame == nil || isFrameActionable(candidate.frame?.cgRect)
             }
             .prefix(limit)
-            .map(\.0)
 
         let labels = LabelGenerator.labels(count: scored.count, alphabet: labelAlphabet)
         result.targets = zip(scored, labels).map { target, label in
@@ -387,12 +466,30 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         sessionID: String?,
         snapshotID: String?
     ) -> TargetSnapshot? {
+        buildSnapshotResult(
+            pid: pid,
+            labelAlphabet: labelAlphabet,
+            scope: scope,
+            includeMenus: includeMenus,
+            sessionID: sessionID,
+            snapshotID: snapshotID
+        )?.snapshot
+    }
+
+    private func buildSnapshotResult(
+        pid: pid_t?,
+        labelAlphabet: String,
+        scope: UISearchScope,
+        includeMenus: Bool,
+        sessionID: String?,
+        snapshotID: String?
+    ) -> SnapshotBuildResult? {
         guard let pid, let app = NSRunningApplication(processIdentifier: pid) else { return nil }
         let appName = app.localizedName ?? app.bundleIdentifier ?? "Unknown"
         let applicationElement = AXUIElementCreateApplication(pid)
         _ = AXUIElementSetMessagingTimeout(applicationElement, 0.05)
 
-        let targets = collectTargets(
+        let collected = collectTargets(
             applicationElement: applicationElement,
             appName: appName,
             labelAlphabet: labelAlphabet,
@@ -401,13 +498,16 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         )
         let windowTitle = focusedWindowTitle(for: applicationElement)
 
-        return TargetSnapshot(
-            appName: appName,
-            bundleIdentifier: app.bundleIdentifier,
-            windowTitle: windowTitle,
-            sessionID: sessionID,
-            snapshotID: snapshotID ?? UUID().uuidString,
-            targets: targets
+        return SnapshotBuildResult(
+            snapshot: TargetSnapshot(
+                appName: appName,
+                bundleIdentifier: app.bundleIdentifier,
+                windowTitle: windowTitle,
+                sessionID: sessionID,
+                snapshotID: snapshotID ?? UUID().uuidString,
+                targets: collected.targets
+            ),
+            elementIndex: collected.elementIndex
         )
     }
 
@@ -417,7 +517,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         labelAlphabet: String,
         scope: UISearchScope,
         includeMenus: Bool
-    ) -> [TargetDescriptor] {
+    ) -> CollectedTargets {
         let roots = rootElements(
             for: applicationElement,
             scope: scope,
@@ -425,56 +525,47 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         )
 
         var results: [TargetDescriptor] = []
-        var visitedKeys = Set<String>()
+        var elementIndex: [String: AXUIElement] = [:]
+        var visitedElements = Set<String>()
 
         for (root, rootLabel) in roots {
             var queue: [(AXUIElement, [String], Int)] = [(root, [rootLabel], 0)]
+            var cursor = 0
 
-            while queue.isEmpty == false, results.count < maxNodes {
-                let (element, path, depth) = queue.removeFirst()
+            while cursor < queue.count, results.count < maxNodes {
+                let (element, path, depth) = queue[cursor]
+                cursor += 1
                 guard depth <= maxDepth else { continue }
+                guard visitedElements.insert(elementKey(for: element)).inserted else { continue }
 
                 let attributes = attributeValues(
                     for: element,
-                    attributes: [
-                        kAXRoleAttribute,
-                        kAXTitleAttribute,
-                        kAXDescriptionAttribute,
-                        kAXIdentifierAttribute,
-                        kAXValueAttribute,
-                        kAXHelpAttribute,
-                        kAXChildrenAttribute,
-                        kAXRowsAttribute,
-                        kAXTabsAttribute,
-                        kAXColumnsAttribute,
-                        kAXContentsAttribute,
-                        kAXVisibleChildrenAttribute,
-                    ]
+                    attributes: traversalAttributes
                 )
 
                 let role = stringValue(from: attributes[kAXRoleAttribute]) ?? "AXUnknown"
+                let value = stringValue(from: attributes[kAXValueAttribute])
                 let title = stringValue(from: attributes[kAXTitleAttribute])
+                    ?? value
                     ?? stringValue(from: attributes[kAXDescriptionAttribute])
                     ?? stringValue(from: attributes[kAXIdentifierAttribute])
                     ?? ""
-                let value = stringValue(from: attributes[kAXValueAttribute])
-
-                let stableKey = [role, title, value ?? "", path.joined(separator: "/")].joined(separator: "|")
-                guard visitedKeys.insert(stableKey).inserted else { continue }
 
                 if shouldInclude(role: role, title: title, value: value, includeMenus: includeMenus) {
-                    let frame = rectValue(for: element)
+                    let frame = rectValue(from: attributes)
                     if frame == nil || isFrameActionable(frame) {
+                        let id = stableID(
+                            appName: appName,
+                            role: role,
+                            title: title,
+                            value: value,
+                            path: path,
+                            frame: frame
+                        )
+                        elementIndex[id] = element
                         results.append(
                             TargetDescriptor(
-                                id: stableID(
-                                    appName: appName,
-                                    role: role,
-                                    title: title,
-                                    value: value,
-                                    path: path,
-                                    frame: frame
-                                ),
+                                id: id,
                                 appName: appName,
                                 role: role,
                                 title: title.isEmpty ? role : title,
@@ -487,29 +578,11 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
                     }
                 }
 
-                let childAttributes = [
-                    kAXChildrenAttribute,
-                    kAXRowsAttribute,
-                    kAXTabsAttribute,
-                    kAXColumnsAttribute,
-                    kAXContentsAttribute,
-                    kAXVisibleChildrenAttribute,
-                ]
-
-                var childrenToEnqueue: [(AXUIElement, String, Int)] = []
-                for attribute in childAttributes {
-                    for (index, child) in elements(from: attributes[attribute]).enumerated() {
-                        childrenToEnqueue.append((child, "\(role)[\(index)]", depth + 1))
-                    }
-                }
-
-                let sheets = childrenToEnqueue.filter {
-                    (stringValue(for: $0.0, attribute: kAXRoleAttribute) ?? "") == "AXSheet"
-                }
-                let rest = childrenToEnqueue.filter {
-                    (stringValue(for: $0.0, attribute: kAXRoleAttribute) ?? "") != "AXSheet"
-                }
-                for (child, label, nextDepth) in sheets + rest {
+                for (child, label, nextDepth) in childQueueEntries(
+                    from: attributes,
+                    role: role,
+                    depth: depth
+                ) {
                     queue.append((child, path + [label], nextDepth))
                 }
             }
@@ -518,11 +591,12 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         }
 
         let labels = LabelGenerator.labels(count: results.count, alphabet: labelAlphabet)
-        return zip(results, labels).map { target, label in
+        let labeledTargets = zip(results, labels).map { target, label in
             var updated = target
             updated.hint = label
             return updated
         }
+        return CollectedTargets(targets: labeledTargets, elementIndex: elementIndex)
     }
 
     private func rootElements(
@@ -580,7 +654,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         includeMenus: Bool
     ) -> CachedUISession? {
         let resolvedSessionID = existingSessionID ?? UUID().uuidString
-        guard let snapshot = buildSnapshot(
+        guard let buildResult = buildSnapshotResult(
             pid: pid,
             labelAlphabet: labelAlphabet,
             scope: scope,
@@ -600,8 +674,9 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
             processIdentifier: pid,
             scope: scope,
             includeMenus: includeMenus,
-            snapshot: snapshot,
-            targetIndex: Dictionary(uniqueKeysWithValues: snapshot.targets.map { ($0.id, $0) }),
+            snapshot: buildResult.snapshot,
+            targetIndex: Dictionary(uniqueKeysWithValues: buildResult.snapshot.targets.map { ($0.id, $0) }),
+            elementIndex: buildResult.elementIndex,
             lastAccessedAt: now,
             lastRefreshedAt: now,
             cacheHits: 0,
@@ -702,7 +777,25 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
     }
 
     private func resolvePID(_ requestedPID: pid_t?) -> pid_t? {
-        requestedPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        requestedPID ?? focusedApplicationPID() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    private func focusedApplicationPID() -> pid_t? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedApplication: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedApplicationAttribute as CFString,
+            &focusedApplication
+        ) == .success,
+            let focusedApplication
+        else {
+            return nil
+        }
+
+        var pid: pid_t = 0
+        AXUIElementGetPid(focusedApplication as! AXUIElement, &pid)
+        return pid > 0 ? pid : nil
     }
 
     private func ensureObserver(for pid: pid_t) {
@@ -835,13 +928,15 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
 
     private func shouldInclude(role: String, title: String, value: String?, includeMenus: Bool) -> Bool {
         let loweredRole = role.lowercased()
-        if includeMenus == false, loweredRole.contains("menu") {
+        if includeMenus == false, ["axmenu", "axmenubar", "axmenubaritem", "axmenuitem"].contains(loweredRole) {
             return false
         }
 
         let actionableRoleFragments = [
             "button", "link", "textfield", "textarea", "checkbox",
             "radiobutton", "scroll", "slider", "tab", "group",
+            "popupbutton", "menubutton", "cell", "statictext",
+            "outline", "browser", "row", "image",
         ]
 
         if actionableRoleFragments.contains(where: loweredRole.contains) {
@@ -897,8 +992,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         }
     }
 
-    private func rectValue(for element: AXUIElement) -> CGRect? {
-        let attributes = attributeValues(for: element, attributes: [kAXPositionAttribute, kAXSizeAttribute])
+    private func rectValue(from attributes: [String: CFTypeRef]) -> CGRect? {
         guard
             let positionAttribute = attributes[kAXPositionAttribute],
             let sizeAttribute = attributes[kAXSizeAttribute]
@@ -920,6 +1014,55 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         return CGRect(origin: point, size: size)
     }
 
+    private func childQueueEntries(
+        from attributes: [String: CFTypeRef],
+        role: String,
+        depth: Int
+    ) -> [(AXUIElement, String, Int)] {
+        let nextDepth = AccessibilityTraversalHeuristics.nextDepth(currentDepth: depth, parentRole: role)
+        var seenChildren = Set<String>()
+        var queuedChildren: [(AXUIElement, String, Int)] = []
+        var nextIndex = 0
+
+        for children in childCollections(from: attributes, role: role) {
+            for child in children {
+                let childKey = elementKey(for: child)
+                guard seenChildren.insert(childKey).inserted else { continue }
+                queuedChildren.append((child, "\(role)[\(nextIndex)]", nextDepth))
+                nextIndex += 1
+            }
+        }
+
+        return queuedChildren
+    }
+
+    private func childCollections(from attributes: [String: CFTypeRef], role: String) -> [[AXUIElement]] {
+        var collections: [[AXUIElement]] = []
+
+        if AccessibilityTraversalHeuristics.isListLikeRole(role) {
+            let visibleRows = elements(from: attributes[AccessibilityTraversalHeuristics.visibleRowsAttribute])
+            if visibleRows.isEmpty == false {
+                collections.append(visibleRows)
+            } else {
+                let rows = elements(from: attributes[kAXRowsAttribute])
+                if rows.isEmpty == false {
+                    collections.append(rows)
+                }
+            }
+        }
+
+        for attribute in AccessibilityTraversalHeuristics.orderedChildAttributes(parentRole: role) {
+            if attribute == AccessibilityTraversalHeuristics.visibleRowsAttribute || attribute == kAXRowsAttribute {
+                continue
+            }
+            let children = elements(from: attributes[attribute])
+            if children.isEmpty == false {
+                collections.append(children)
+            }
+        }
+        return collections
+    }
+
     private func isFrameActionable(_ frame: CGRect?) -> Bool {
         guard let frame, frame.width > 0, frame.height > 0 else { return false }
         return NSScreen.screens.isEmpty || NSScreen.screens.contains(where: { $0.frame.intersects(frame) })
@@ -937,17 +1080,17 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
             return nil
         }
 
-        if CFGetTypeID(value) == AXUIElementGetTypeID() {
-            return (value as! AXUIElement)
-        }
-        return nil
+        return elements(from: value).first
     }
 
     private func elements(from value: CFTypeRef?) -> [AXUIElement] {
-        if let elements = value as? [AXUIElement] {
-            return elements
-        }
-        return []
+        AXElementValueParser.elements(from: value)
+    }
+
+    private func elementKey(for element: AXUIElement) -> String {
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        return "\(pid):\(CFHash(element))"
     }
 
     private func focusedWindow(for applicationElement: AXUIElement) -> AXUIElement? {
@@ -957,6 +1100,252 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
     private func focusedWindowTitle(for applicationElement: AXUIElement) -> String? {
         guard let window = focusedWindow(for: applicationElement) else { return nil }
         return stringValue(for: window, attribute: kAXTitleAttribute)
+    }
+
+    private func debugDumpPayload(
+        for element: AXUIElement,
+        target: TargetDescriptor,
+        session: CachedUISession,
+        maxDepth: Int
+    ) -> JSONValue {
+        let elementIDByKey = Dictionary(uniqueKeysWithValues: session.elementIndex.map { (elementKey(for: $0.value), $0.key) })
+        var visited = Set<String>()
+
+        return .object([
+            "sessionID": .string(session.id),
+            "snapshotID": session.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+            "appName": .string(session.snapshot.appName),
+            "target": target.payload,
+            "tree": debugNode(
+                for: element,
+                depth: 0,
+                maxDepth: maxDepth,
+                visited: &visited,
+                elementIDByKey: elementIDByKey
+            ),
+        ])
+    }
+
+    private func debugNode(
+        for element: AXUIElement,
+        depth: Int,
+        maxDepth: Int,
+        visited: inout Set<String>,
+        elementIDByKey: [String: String]
+    ) -> JSONValue {
+        let key = elementKey(for: element)
+        if visited.insert(key).inserted == false {
+            return .object([
+                "elementKey": .string(key),
+                "cycle": .bool(true),
+            ])
+        }
+
+        let attributeNames = allAttributeNames(for: element)
+        let attributes = attributeValues(for: element, attributes: attributeNames)
+        let role = stringValue(from: attributes[kAXRoleAttribute]) ?? "AXUnknown"
+        let title = stringValue(from: attributes[kAXTitleAttribute])
+            ?? stringValue(from: attributes[kAXDescriptionAttribute])
+            ?? stringValue(from: attributes[kAXIdentifierAttribute])
+            ?? role
+        let value = stringValue(from: attributes[kAXValueAttribute])
+
+        let serializedAttributes = Dictionary(uniqueKeysWithValues: attributeNames.map { attribute in
+            (attribute, debugValue(from: attributes[attribute]))
+        })
+
+        let childAttributes = debugChildAttributeNames(
+            from: attributes,
+            role: role,
+            availableAttributeNames: attributeNames
+        )
+        let childSources: [JSONValue]
+        if depth >= maxDepth {
+            childSources = []
+        } else {
+            childSources = childAttributes.map { attribute in
+                let children = elements(from: attributes[attribute])
+                let limitedChildren = Array(children.prefix(debugTraversalElementLimit))
+                return .object([
+                    "attribute": .string(attribute),
+                    "count": .number(Double(children.count)),
+                    "truncated": .bool(children.count > limitedChildren.count),
+                    "children": .array(limitedChildren.map {
+                        debugNode(
+                            for: $0,
+                            depth: depth + 1,
+                            maxDepth: maxDepth,
+                            visited: &visited,
+                            elementIDByKey: elementIDByKey
+                        )
+                    }),
+                ])
+            }
+        }
+
+        return .object([
+            "elementKey": .string(key),
+            "targetID": elementIDByKey[key].map(JSONValue.string) ?? .null,
+            "role": .string(role),
+            "title": .string(title),
+            "value": value.map(JSONValue.string) ?? .null,
+            "frame": rectValue(from: attributes).map(framePayload) ?? .null,
+            "attributes": .object(serializedAttributes),
+            "childSources": .array(childSources),
+        ])
+    }
+
+    private func allAttributeNames(for element: AXUIElement) -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success else { return traversalAttributes }
+        let resolved = (names as? [String]) ?? []
+        return resolved.isEmpty ? traversalAttributes : resolved.sorted()
+    }
+
+    private func debugChildAttributeNames(
+        from attributes: [String: CFTypeRef],
+        role: String,
+        availableAttributeNames: [String]
+    ) -> [String] {
+        var names: [String] = []
+
+        func append(_ attribute: String) {
+            guard debugChildAttributeExclusions.contains(attribute) == false else { return }
+            guard names.contains(attribute) == false else { return }
+            guard elements(from: attributes[attribute]).isEmpty == false else { return }
+            names.append(attribute)
+        }
+
+        for attribute in AccessibilityTraversalHeuristics.orderedChildAttributes(parentRole: role) {
+            append(attribute)
+        }
+
+        for attribute in availableAttributeNames {
+            append(attribute)
+        }
+
+        return names
+    }
+
+    private func debugValue(from value: CFTypeRef?) -> JSONValue {
+        guard let value else { return .null }
+
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            return .number(number.doubleValue)
+        }
+
+        if let string = stringValue(from: value) {
+            return .string(string)
+        }
+
+        if CFGetTypeID(value) == AXValueGetTypeID() {
+            return debugAXValue(value as! AXValue)
+        }
+
+        if let array = value as? [Any] {
+            return .array(array.prefix(debugTraversalElementLimit).map { debugValue(any: $0) })
+        }
+
+        let typeID = CFGetTypeID(value)
+        if typeID == AXUIElementGetTypeID() {
+            return debugElementReference(value as! AXUIElement)
+        }
+
+        return .string(String(describing: value))
+    }
+
+    private func debugValue(any value: Any) -> JSONValue {
+        if value is NSNull {
+            return .null
+        }
+
+        if let string = value as? String {
+            return .string(string)
+        }
+
+        if let attributed = value as? NSAttributedString {
+            return .string(attributed.string)
+        }
+
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            return .number(number.doubleValue)
+        }
+
+        if let array = value as? [Any] {
+            return .array(array.prefix(debugTraversalElementLimit).map { debugValue(any: $0) })
+        }
+
+        let cfValue = value as AnyObject
+        if CFGetTypeID(cfValue) == AXUIElementGetTypeID() {
+            return debugElementReference(cfValue as! AXUIElement)
+        }
+
+        if CFGetTypeID(cfValue) == AXValueGetTypeID() {
+            return debugAXValue(cfValue as! AXValue)
+        }
+
+        return .string(String(describing: value))
+    }
+
+    private func debugAXValue(_ value: AXValue) -> JSONValue {
+        switch AXValueGetType(value) {
+        case .cgPoint:
+            var point = CGPoint.zero
+            guard AXValueGetValue(value, .cgPoint, &point) else { return .string("AXValue(CGPoint)") }
+            return ["type": .string("CGPoint"), "x": .number(point.x), "y": .number(point.y)]
+        case .cgSize:
+            var size = CGSize.zero
+            guard AXValueGetValue(value, .cgSize, &size) else { return .string("AXValue(CGSize)") }
+            return ["type": .string("CGSize"), "width": .number(size.width), "height": .number(size.height)]
+        case .cgRect:
+            var rect = CGRect.zero
+            guard AXValueGetValue(value, .cgRect, &rect) else { return .string("AXValue(CGRect)") }
+            return ["type": .string("CGRect"), "rect": framePayload(rect)]
+        case .cfRange:
+            var range = CFRange()
+            guard AXValueGetValue(value, .cfRange, &range) else { return .string("AXValue(CFRange)") }
+            return [
+                "type": .string("CFRange"),
+                "location": .number(Double(range.location)),
+                "length": .number(Double(range.length)),
+            ]
+        default:
+            return .string("AXValue(\(AXValueGetType(value).rawValue))")
+        }
+    }
+
+    private func debugElementReference(_ element: AXUIElement) -> JSONValue {
+        let attributes = attributeValues(
+            for: element,
+            attributes: [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute]
+        )
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+
+        return .object([
+            "type": .string("AXUIElement"),
+            "elementKey": .string(elementKey(for: element)),
+            "pid": .number(Double(pid)),
+            "role": stringValue(from: attributes[kAXRoleAttribute]).map(JSONValue.string) ?? .null,
+            "title": stringValue(from: attributes[kAXTitleAttribute]).map(JSONValue.string) ?? .null,
+            "value": stringValue(from: attributes[kAXValueAttribute]).map(JSONValue.string) ?? .null,
+            "description": stringValue(from: attributes[kAXDescriptionAttribute]).map(JSONValue.string) ?? .null,
+        ])
+    }
+
+    private func framePayload(_ rect: CGRect) -> JSONValue {
+        [
+            "x": .number(rect.origin.x),
+            "y": .number(rect.origin.y),
+            "width": .number(rect.width),
+            "height": .number(rect.height),
+        ]
     }
 
     private func stableID(

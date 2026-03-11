@@ -99,8 +99,13 @@ public struct ControlPlaneToolRegistry: Sendable {
             schemaProperties: [
                 "scope": .string("string"),
                 "detail": .string("string"),
+                "targetID": .string("string"),
                 "pid": .string("number"),
                 "app": .string("string"),
+                "sessionID": .string("string"),
+                "snapshotID": .string("string"),
+                "includeMenus": .string("boolean"),
+                "maxDepth": .string("number"),
                 "adapter": .string("string"),
                 "debugTimings": .string("boolean"),
             ]

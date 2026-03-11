@@ -314,6 +314,52 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     }
 
     private func uiCaptureResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let detail = request.string(for: "detail")?.lowercased() ?? "compact"
+        if detail == "raw" || detail == "raw_ax" || detail == "diagnostic" {
+            guard let targetID = request.string(for: "targetID") else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .invalidRequest,
+                    message: "Missing targetID for raw AX capture."
+                )
+            }
+
+            let payload = snapshotter.debugDump(
+                targetID: targetID,
+                pid: resolvedApplication.pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                sessionID: request.string(for: "sessionID"),
+                snapshotID: request.string(for: "snapshotID"),
+                scope: searchScope(for: request),
+                includeMenus: includeMenus(for: request),
+                maxDepth: request.int(for: "maxDepth") ?? 2
+            )
+
+            guard let payload else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "Unable to dump AX attributes for the requested target."
+                )
+            }
+
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .success,
+                message: "Captured raw AX diagnostics for \(targetID).",
+                payload: payload
+            )
+        }
+
         let captureRequest = request.with(arguments: [
             "query": .string(""),
             "limit": .number(250),
@@ -323,7 +369,6 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         ])
         let search = await uiSearchResult(for: captureRequest)
         guard search.outcome == .success else { return search }
-        let detail = request.string(for: "detail")?.lowercased() ?? "compact"
         guard var payload = search.payload?.objectValue else { return search }
         payload["graphID"] = payload["sessionID"] ?? .null
         payload["stale"] = .bool(false)

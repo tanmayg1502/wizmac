@@ -188,6 +188,37 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(result.outcome, .notFound)
     }
 
+    func testUICaptureRawReturnsDebugPayloadForTarget() async throws {
+        let target = sampleTarget(id: "button-1", title: "Primary Action", role: "AXButton")
+        let snapshot = sampleSnapshot(targets: [target])
+        let snapshotter = SnapshotterStub(snapshot: snapshot, hintSession: nil)
+        snapshotter.debugDumpPayloadValue = [
+            "target": target.payload,
+            "tree": [
+                "role": .string("AXButton"),
+                "title": .string("Primary Action"),
+            ],
+        ]
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiCapture,
+                arguments: [
+                    "detail": .string("raw"),
+                    "targetID": .string(target.id),
+                    "sessionID": .string("session-1"),
+                    "snapshotID": .string("snapshot-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["target"]?.objectValue?["id"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["tree"]?.objectValue?["role"]?.stringValue, "AXButton")
+    }
+
     func testAirPlayDisconnectUsesDisconnectPath() async throws {
         let airPlay = AirPlayControllerStub()
         let dependencies = try makeDependencies(airPlayController: airPlay)
@@ -301,6 +332,7 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
     var snapshot: TargetSnapshot?
     var hintSessionValue: UIHintSession?
     var targetsByID: [String: TargetDescriptor]
+    var debugDumpPayloadValue: JSONValue?
     var sessionMetrics = UISessionMetrics(
         sessionID: "session-1",
         snapshotID: "snapshot-1",
@@ -370,6 +402,19 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
 
     func hintSession(query _: String?, labelAlphabet _: String, limit _: Int) -> UIHintSession? {
         hintSessionValue
+    }
+
+    func debugDump(
+        targetID _: String,
+        pid _: pid_t?,
+        labelAlphabet _: String,
+        sessionID _: String?,
+        snapshotID _: String?,
+        scope _: UISearchScope,
+        includeMenus _: Bool,
+        maxDepth _: Int
+    ) -> JSONValue? {
+        debugDumpPayloadValue
     }
 }
 
