@@ -219,6 +219,40 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(result.payload?.objectValue?["tree"]?.objectValue?["role"]?.stringValue, "AXButton")
     }
 
+    func testUIActReturnsPostStateAndSessionMetadata() async throws {
+        let target = sampleTarget(
+            id: "chat-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 10, y: 20, width: 80, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        snapshotter.targetsByID[target.id] = target
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "targetID": .string(target.id),
+                    "nextQuery": .string("Compose message"),
+                    "debugTimings": .bool(true),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["sessionID"]?.stringValue, "session-1")
+        XCTAssertEqual(result.payload?.objectValue?["snapshotID"]?.stringValue, "snapshot-1")
+        XCTAssertEqual(result.payload?.objectValue?["postState"]?.objectValue?["targets"]?.arrayValue?.count, 1)
+        XCTAssertEqual(snapshotter.endSessionCalls, ["session-1"])
+        XCTAssertEqual(snapshotter.searchInvocations.last?.query, "Compose message")
+        XCTAssertEqual(pointer.clicks.count, 1)
+    }
+
     func testAirPlayDisconnectUsesDisconnectPath() async throws {
         let airPlay = AirPlayControllerStub()
         let dependencies = try makeDependencies(airPlayController: airPlay)
@@ -250,6 +284,95 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(result.action, .windowExclude)
         XCTAssertEqual(result.outcome, .success)
         XCTAssertTrue(settings.excludedWindows.contains(windowRule))
+    }
+
+    func testTextInsertCanResolveQueryTargetAndReturnPostState() async throws {
+        let target = sampleTarget(
+            id: "composer",
+            title: "Compose message",
+            role: "AXTextField",
+            rect: TargetRect(x: 50, y: 100, width: 200, height: 36)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        let bridge = FocusedTextBridgeStub(
+            capture: FocusedTextCapture(
+                element: nil,
+                context: sampleTextContext()
+            )
+        )
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(
+            snapshotter: snapshotter,
+            focusedTextBridge: bridge,
+            pointerPerformer: pointer
+        )
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .textInsert,
+                arguments: [
+                    "query": .string("Compose message"),
+                    "text": .string("hello"),
+                    "submit": .bool(true),
+                    "nextQuery": .string("Sent"),
+                    "debugTimings": .bool(true),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["postState"]?.objectValue?["targets"]?.arrayValue?.count, 1)
+        XCTAssertEqual(snapshotter.searchInvocations.map(\.query), ["Compose message", "Sent"])
+        XCTAssertEqual(pointer.clicks.count, 1)
+        XCTAssertEqual(bridge.syncedContexts.last?.text, "hellohello world")
+    }
+
+    func testUIExecuteInterpolatesBindingsAndCarriesAmbientSessionIdentifiers() async throws {
+        let target = sampleTarget(
+            id: "family-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 20, y: 40, width: 120, height: 28)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        snapshotter.targetsByID[target.id] = target
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiExecute,
+                arguments: [
+                    "actions": .array([
+                        .object([
+                            "tool": .string("ui.search"),
+                            "bind": .string("family"),
+                            "arguments": .object([
+                                "query": .string("Family"),
+                            ]),
+                        ]),
+                        .object([
+                            "tool": .string("ui.act"),
+                            "arguments": .object([
+                                "targetID": .string("{{family.payload.targets[0].id}}"),
+                            ]),
+                        ]),
+                    ]),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(pointer.clicks.count, 1)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.sessionID, "session-1")
+        XCTAssertEqual(result.payload?.objectValue?["sessionID"]?.stringValue, "session-1")
+        XCTAssertEqual(
+            result.payload?.objectValue?["results"]?.arrayValue?.last?.objectValue?["payload"]?.objectValue?["targetID"]?.stringValue,
+            target.id
+        )
     }
 }
 
@@ -329,10 +452,30 @@ private extension ExecutorContractTests {
 }
 
 private final class SnapshotterStub: AccessibilitySnapshotting {
+    struct SearchInvocation: Equatable {
+        var query: String
+        var sessionID: String?
+        var pid: pid_t?
+        var scope: UISearchScope
+        var includeMenus: Bool
+    }
+
+    struct TargetLookupInvocation: Equatable {
+        var id: String
+        var sessionID: String?
+        var snapshotID: String?
+        var pid: pid_t?
+        var scope: UISearchScope
+        var includeMenus: Bool
+    }
+
     var snapshot: TargetSnapshot?
     var hintSessionValue: UIHintSession?
     var targetsByID: [String: TargetDescriptor]
     var debugDumpPayloadValue: JSONValue?
+    var searchInvocations: [SearchInvocation] = []
+    var targetLookupInvocations: [TargetLookupInvocation] = []
+    var endSessionCalls: [String?] = []
     var sessionMetrics = UISessionMetrics(
         sessionID: "session-1",
         snapshotID: "snapshot-1",
@@ -362,14 +505,23 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
     }
 
     func search(
-        query _: String,
-        pid _: pid_t?,
+        query: String,
+        pid: pid_t?,
         labelAlphabet _: String,
         limit _: Int,
-        sessionID _: String?,
-        scope _: UISearchScope,
-        includeMenus _: Bool
+        sessionID: String?,
+        scope: UISearchScope,
+        includeMenus: Bool
     ) -> UISearchResult? {
+        searchInvocations.append(
+            SearchInvocation(
+                query: query,
+                sessionID: sessionID,
+                pid: pid,
+                scope: scope,
+                includeMenus: includeMenus
+            )
+        )
         guard var snapshot else { return nil }
         snapshot.sessionID = sessionMetrics.sessionID
         snapshot.snapshotID = sessionMetrics.snapshotID
@@ -383,21 +535,32 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
 
     func target(
         id: String,
-        pid _: pid_t?,
+        pid: pid_t?,
         labelAlphabet _: String,
-        sessionID _: String?,
-        snapshotID _: String?,
-        scope _: UISearchScope,
-        includeMenus _: Bool
+        sessionID: String?,
+        snapshotID: String?,
+        scope: UISearchScope,
+        includeMenus: Bool
     ) -> UITargetLookupResult? {
+        targetLookupInvocations.append(
+            TargetLookupInvocation(
+                id: id,
+                sessionID: sessionID,
+                snapshotID: snapshotID,
+                pid: pid,
+                scope: scope,
+                includeMenus: includeMenus
+            )
+        )
         guard let resolvedTarget = targetsByID[id] ?? snapshot?.targets.first(where: { $0.id == id }) else {
             return nil
         }
         return UITargetLookupResult(target: resolvedTarget, metrics: sessionMetrics)
     }
 
-    func endSession(id _: String?) -> UISessionMetrics? {
-        sessionMetrics
+    func endSession(id: String?) -> UISessionMetrics? {
+        endSessionCalls.append(id)
+        return sessionMetrics
     }
 
     func hintSession(query _: String?, labelAlphabet _: String, limit _: Int) -> UIHintSession? {

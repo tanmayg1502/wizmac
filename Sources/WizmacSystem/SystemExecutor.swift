@@ -6,6 +6,9 @@ import WizmacTextMode
 final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     private struct ResolvedTargetApplication {
         var pid: pid_t?
+        var appName: String?
+        var bundleIdentifier: String?
+        var launched: Bool
         var unresolvedApp: String?
     }
 
@@ -134,19 +137,20 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         (try? await settingsStore.load()) ?? WizmacSettings()
     }
 
-    /// Resolves a target PID from `pid` (integer) or `app` (name / bundle ID) arguments.
-    /// Returns a nil pid when neither is provided, meaning "use frontmost app".
     private func resolvePID(from request: ActionRequest) -> ResolvedTargetApplication {
-        if let pid = request.int(for: "pid") {
-            return ResolvedTargetApplication(pid: pid_t(pid), unresolvedApp: nil)
-        }
-        if let app = request.string(for: "app") {
-            let resolved = NSWorkspace.shared.runningApplications.first {
-                $0.localizedName == app || $0.bundleIdentifier == app
-            }?.processIdentifier
-            return ResolvedTargetApplication(pid: resolved, unresolvedApp: resolved == nil ? app : nil)
-        }
-        return ResolvedTargetApplication(pid: nil, unresolvedApp: nil)
+        let resolution = RunningApplicationResolver.resolve(
+            pid: request.int(for: "pid").map(pid_t.init),
+            app: request.string(for: "app"),
+            launchIfNeeded: request.bool(for: "launchIfNeeded") ?? false,
+            activate: request.bool(for: "activate") ?? false
+        )
+        return ResolvedTargetApplication(
+            pid: resolution.pid,
+            appName: resolution.appName,
+            bundleIdentifier: resolution.bundleIdentifier,
+            launched: resolution.launched,
+            unresolvedApp: resolution.unresolvedApp
+        )
     }
 
     private func searchScope(for request: ActionRequest) -> UISearchScope {
@@ -171,7 +175,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             requestID: request.id,
             action: request.action,
             outcome: .notFound,
-            message: "Could not find a running application matching '\(app)'."
+            message: "Could not find or launch an application matching '\(app)'."
         )
     }
 
@@ -406,7 +410,33 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             )
         }
 
+        if request.string(for: "trustedSessionID") != nil {
+            for step in actions {
+                guard let object = step.objectValue,
+                      let rawTool = object["tool"]?.stringValue,
+                      let action = ActionName(rawValue: rawTool)
+                else {
+                    return ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .invalidRequest,
+                        message: "Each action must include a valid tool name."
+                    )
+                }
+                guard TrustedAutomationPolicy.trustedBatchAllowedActions.contains(action) else {
+                    return ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .invalidRequest,
+                        message: "\(rawTool) is not allowed inside a trusted ui.execute batch."
+                    )
+                }
+            }
+        }
+
         var results: [JSONValue] = []
+        var bindings: [String: JSONValue] = [:]
+        var ambientArguments = ambientBatchArguments(from: request.arguments)
         for step in actions {
             guard let object = step.objectValue,
                   let rawTool = object["tool"]?.stringValue,
@@ -420,18 +450,31 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                 )
             }
 
-            var args = object["arguments"]?.objectValue ?? [:]
-            if let snapshotID = request.string(for: "snapshotID"), args["snapshotID"] == nil {
-                args["snapshotID"] = .string(snapshotID)
-            }
+            let alias = object["bind"]?.stringValue ?? object["id"]?.stringValue ?? object["name"]?.stringValue
+            let rawArguments = object["arguments"]?.objectValue ?? [:]
+            let args = interpolateBatchArguments(
+                rawArguments,
+                bindings: bindings,
+                ambientArguments: ambientArguments,
+                lastResult: results.last
+            )
             let subRequest = ActionRequest(action: action, arguments: args, origin: request.origin)
             let subResult = await execute(subRequest)
-            results.append([
+            let stepResult: JSONValue = [
                 "tool": .string(rawTool),
+                "alias": alias.map(JSONValue.string) ?? .null,
                 "outcome": .string(subResult.outcome.rawValue),
                 "message": .string(subResult.message),
                 "payload": subResult.payload ?? .null,
-            ])
+            ]
+            results.append(stepResult)
+            if let alias, alias.isEmpty == false {
+                bindings[alias] = stepResult
+            }
+            ambientArguments = updatedAmbientBatchArguments(
+                from: subResult.payload,
+                existing: ambientArguments
+            )
             if request.bool(for: "stopOnFailure") ?? true, subResult.outcome != .success {
                 break
             }
@@ -443,8 +486,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             outcome: .success,
             message: "Executed \(results.count) batched action(s).",
             payload: [
-                "graphID": request.arguments["graphID"] ?? .null,
-                "snapshotID": request.arguments["snapshotID"] ?? .null,
+                "graphID": ambientArguments["graphID"] ?? .null,
+                "sessionID": ambientArguments["sessionID"] ?? .null,
+                "snapshotID": ambientArguments["snapshotID"] ?? .null,
+                "trustedSessionID": ambientArguments["trustedSessionID"] ?? .null,
                 "results": .array(results),
                 "engine": .string("ax"),
             ]
@@ -485,33 +530,51 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let interaction = request.string(for: "interaction") ?? "press"
         let startedAt = Date()
-        let success = performInteraction(interaction, on: targetLookup.target, pid: pid, labelAlphabet: currentSettings.labelAlphabet, request: request)
-        var result = ActionResult(
-            requestID: request.id,
-            action: request.action,
-            outcome: success ? .success : .failed,
-            message: success ? "Performed \(interaction) on \(targetLookup.target.title)." : "Failed to perform \(interaction).",
-            payload: debugTimingsRequested(for: request)
-                ? [
-                    "timings": debugTimingsPayload(
-                        searchMetrics: targetLookup.metrics,
-                        actionMs: Date().timeIntervalSince(startedAt) * 1_000
-                    ),
-                ]
-                : nil
+        let success = performInteraction(
+            interaction,
+            on: targetLookup.target,
+            pid: pid,
+            labelAlphabet: currentSettings.labelAlphabet,
+            request: request
         )
-        if debugTimingsRequested(for: request), let payload = result.payload?.objectValue {
-            result.payload = .object(
-                payload.merging(
+        let actionMs = Date().timeIntervalSince(startedAt) * 1_000
+        let postStateStartedAt = Date()
+        let postState = success
+            ? await postActionStatePayload(
+                for: request,
+                pid: pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                currentSessionID: targetLookup.metrics.sessionID
+            )
+            : nil
+        let postActionRefreshMs = postState == nil ? 0 : Date().timeIntervalSince(postStateStartedAt) * 1_000
+        var payload = baseTargetPayload(
+            targetLookup: targetLookup,
+            interaction: interaction,
+            extra: postState.map { ["postState": $0] } ?? [:]
+        )
+        if debugTimingsRequested(for: request), let payloadObject = payload.objectValue {
+            payload = .object(
+                payloadObject.merging(
                     [
-                        "sessionID": .string(targetLookup.metrics.sessionID),
-                        "snapshotID": .string(targetLookup.metrics.snapshotID),
+                        "timings": debugTimingsPayload(
+                            searchMetrics: targetLookup.metrics,
+                            actionMs: actionMs,
+                            postActionRefreshMs: postActionRefreshMs
+                        ),
                     ],
                     uniquingKeysWith: { _, new in new }
                 )
             )
         }
-        return result
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Performed \(interaction) on \(targetLookup.target.title)." : "Failed to perform \(interaction).",
+            payload: payload
+        )
     }
 
     private func uiCopyResult(for request: ActionRequest) async -> ActionResult {
@@ -539,13 +602,15 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
 
-        var payload: JSONValue = ["value": .string(value)]
+        var payload = baseTargetPayload(
+            targetLookup: targetLookup,
+            interaction: request.string(for: "mode") ?? "copy",
+            extra: ["value": .string(value)]
+        )
         if debugTimingsRequested(for: request), let object = payload.objectValue {
             payload = .object(
                 object.merging(
                     [
-                        "sessionID": .string(targetLookup.metrics.sessionID),
-                        "snapshotID": .string(targetLookup.metrics.snapshotID),
                         "timings": debugTimingsPayload(searchMetrics: targetLookup.metrics, actionMs: 0),
                     ],
                     uniquingKeysWith: { _, new in new }
@@ -878,15 +943,6 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     }
 
     private func textInsertResult(for request: ActionRequest) async -> ActionResult {
-        guard let capture = focusedTextBridge.captureFocusedContext() else {
-            return ActionResult(
-                requestID: request.id,
-                action: request.action,
-                outcome: .notFound,
-                message: "No focused text input is available."
-            )
-        }
-
         let text = request.string(for: "text") ?? request.string(for: "keys") ?? ""
         guard text.isEmpty == false else {
             return ActionResult(
@@ -894,6 +950,49 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                 action: request.action,
                 outcome: .invalidRequest,
                 message: "No text was provided."
+            )
+        }
+
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+        let pid = resolvedApplication.pid
+
+        let targetResolution = textInsertTargetLookup(
+            for: request,
+            pid: pid,
+            labelAlphabet: currentSettings.labelAlphabet
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+        if let targetLookup = targetResolution.targetLookup {
+            let didFocus = performInteraction(
+                "press",
+                on: targetLookup.target,
+                pid: pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                request: request
+            )
+            guard didFocus else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .failed,
+                    message: "Unable to focus the requested text target."
+                )
+            }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+
+        guard let capture = focusedTextBridge.captureFocusedContext() else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "No focused text input is available."
             )
         }
 
@@ -911,17 +1010,42 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let submitResult = submit ? postReturnKey() : true
         let actionMs = Date().timeIntervalSince(startedAt) * 1_000
+        let postStateStartedAt = Date()
+        let targetLookup = targetResolution.targetLookup
+        let postState = submitResult
+            ? await postActionStatePayload(
+                for: request,
+                pid: pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                currentSessionID: targetLookup?.metrics.sessionID
+            )
+            : nil
+        let postActionRefreshMs = postState == nil ? 0 : Date().timeIntervalSince(postStateStartedAt) * 1_000
         var payload: JSONValue = [
             "application": context.applicationName.map(JSONValue.string) ?? .null,
             "elementIdentifier": .string(context.elementIdentifier),
+            "targetID": targetLookup.map { JSONValue.string($0.target.id) } ?? .null,
+            "target": targetLookup.map { $0.target.payload } ?? .null,
+            "sessionID": targetLookup.map { JSONValue.string($0.metrics.sessionID) } ?? request.arguments["sessionID"] ?? .null,
+            "snapshotID": targetLookup.map { JSONValue.string($0.metrics.snapshotID) } ?? request.arguments["snapshotID"] ?? .null,
+            "graphID": targetLookup.map { JSONValue.string($0.metrics.sessionID) } ?? request.arguments["graphID"] ?? request.arguments["sessionID"] ?? .null,
         ]
+        if let payloadObject = payload.objectValue, let postState {
+            payload = .object(
+                payloadObject.merging(
+                    ["postState": postState],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+        }
         if debugTimingsRequested(for: request), let payloadObject = payload.objectValue {
             payload = .object(
                 payloadObject.merging(
                     [
                         "timings": debugTimingsPayload(
                             searchMetrics: nil,
-                            actionMs: actionMs
+                            actionMs: actionMs,
+                            postActionRefreshMs: postActionRefreshMs
                         ),
                     ],
                     uniquingKeysWith: { _, new in new }
@@ -1164,7 +1288,11 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         ]
     }
 
-    private func debugTimingsPayload(searchMetrics: UISessionMetrics?, actionMs: Double) -> JSONValue {
+    private func debugTimingsPayload(
+        searchMetrics: UISessionMetrics?,
+        actionMs: Double,
+        postActionRefreshMs: Double = 0
+    ) -> JSONValue {
         [
             "clientProcessMs": .number(0),
             "transportMs": .number(0),
@@ -1176,12 +1304,482 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             "snapshotRefreshMs": .number(searchMetrics?.snapshotMs ?? 0),
             "routePlanMs": .number(searchMetrics?.rankingMs ?? 0),
             "actionMs": .number(actionMs),
-            "postActionRefreshMs": .number(0),
+            "postActionRefreshMs": .number(postActionRefreshMs),
             "engine": .string("ax"),
             "approvalMode": .string("strict"),
             "cacheHit": .bool(searchMetrics?.cacheHit ?? false),
         ]
     }
+
+    private func baseTargetPayload(
+        targetLookup: UITargetLookupResult,
+        interaction: String,
+        extra: [String: JSONValue] = [:]
+    ) -> JSONValue {
+        var payload: [String: JSONValue] = [
+            "targetID": .string(targetLookup.target.id),
+            "target": targetLookup.target.payload,
+            "interaction": .string(interaction),
+            "appName": .string(targetLookup.metrics.appName),
+            "windowTitle": targetLookup.metrics.windowTitle.map(JSONValue.string) ?? .null,
+            "sessionID": .string(targetLookup.metrics.sessionID),
+            "snapshotID": .string(targetLookup.metrics.snapshotID),
+            "graphID": .string(targetLookup.metrics.sessionID),
+            "engine": .string("ax"),
+        ]
+        for (key, value) in extra {
+            payload[key] = value
+        }
+        return .object(payload)
+    }
+
+    private enum PostActionStateMode {
+        case none
+        case search(query: String, limit: Int)
+        case capture(detail: String)
+    }
+
+    private struct TextInsertTargetResolution {
+        var targetLookup: UITargetLookupResult?
+        var failure: ActionResult?
+    }
+
+    private func requestedPostActionState(for request: ActionRequest) -> PostActionStateMode {
+        let nextLimit = max(request.int(for: "nextLimit") ?? 20, 1)
+        if let nextQuery = request.string(for: "nextQuery") {
+            return .search(query: nextQuery, limit: nextLimit)
+        }
+
+        guard let rawState = request.arguments["postState"] else {
+            return .none
+        }
+
+        switch rawState {
+        case .bool(false):
+            return .none
+        case .bool(true):
+            return .capture(detail: "compact")
+        case let .string(value):
+            switch value.lowercased() {
+            case "none", "false", "off":
+                return .none
+            case "search", "refresh":
+                return .search(query: request.string(for: "query") ?? "", limit: nextLimit)
+            case "capture", "compact":
+                return .capture(detail: "compact")
+            case "full":
+                return .capture(detail: "full")
+            default:
+                return .capture(detail: "compact")
+            }
+        default:
+            return .capture(detail: "compact")
+        }
+    }
+
+    private func postActionStatePayload(
+        for request: ActionRequest,
+        pid: pid_t?,
+        labelAlphabet: String,
+        currentSessionID: String?
+    ) async -> JSONValue? {
+        let mode = requestedPostActionState(for: request)
+        guard case .none = mode else {
+            let sessionID = request.string(for: "sessionID") ?? currentSessionID
+            if let sessionID {
+                _ = snapshotter.endSession(id: sessionID)
+            }
+
+            switch mode {
+            case let .search(query, limit):
+                guard let searchResult = snapshotter.search(
+                    query: query,
+                    pid: pid,
+                    labelAlphabet: labelAlphabet,
+                    limit: limit,
+                    sessionID: nil,
+                    scope: searchScope(for: request),
+                    includeMenus: includeMenus(for: request)
+                ) else {
+                    return nil
+                }
+                return uiSearchPayload(
+                    searchResult,
+                    includeDebugTimings: debugTimingsRequested(for: request)
+                )
+            case let .capture(detail):
+                guard let searchResult = snapshotter.search(
+                    query: "",
+                    pid: pid,
+                    labelAlphabet: labelAlphabet,
+                    limit: 250,
+                    sessionID: nil,
+                    scope: searchScope(for: request),
+                    includeMenus: false
+                ) else {
+                    return nil
+                }
+                guard var payload = uiSearchPayload(
+                    searchResult,
+                    includeDebugTimings: debugTimingsRequested(for: request)
+                ).objectValue else {
+                    return nil
+                }
+                payload["graphID"] = payload["sessionID"] ?? .null
+                payload["stale"] = .bool(false)
+                payload["engine"] = .string("ax")
+                if detail != "full" {
+                    payload["targets"] = .array((payload["targets"]?.arrayValue ?? []).prefix(25).map { $0 })
+                }
+                return .object(payload)
+            case .none:
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    private func textInsertTargetLookup(
+        for request: ActionRequest,
+        pid: pid_t?,
+        labelAlphabet: String
+    ) -> TextInsertTargetResolution {
+        if let targetID = request.string(for: "targetID") {
+            guard let lookup = snapshotter.target(
+                id: targetID,
+                pid: pid,
+                labelAlphabet: labelAlphabet,
+                sessionID: request.string(for: "sessionID"),
+                snapshotID: request.string(for: "snapshotID"),
+                scope: searchScope(for: request),
+                includeMenus: includeMenus(for: request)
+            ) else {
+                return TextInsertTargetResolution(
+                    targetLookup: nil,
+                    failure: ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "Target not found."
+                    )
+                )
+            }
+            return TextInsertTargetResolution(targetLookup: lookup, failure: nil)
+        }
+
+        guard let query = request.string(for: "query") else {
+            return TextInsertTargetResolution(targetLookup: nil, failure: nil)
+        }
+
+        guard let searchResult = snapshotter.search(
+            query: query,
+            pid: pid,
+            labelAlphabet: labelAlphabet,
+            limit: max(request.int(for: "limit") ?? 1, 1),
+            sessionID: request.string(for: "sessionID"),
+            scope: searchScope(for: request),
+            includeMenus: includeMenus(for: request)
+        ) else {
+            return TextInsertTargetResolution(
+                targetLookup: nil,
+                failure: ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .permissionRequired,
+                    message: "Unable to inspect the requested application."
+                )
+            )
+        }
+
+        guard let firstTarget = searchResult.snapshot.targets.first else {
+            return TextInsertTargetResolution(
+                targetLookup: nil,
+                failure: ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "No UI target matched '\(query)'."
+                )
+            )
+        }
+
+        return TextInsertTargetResolution(
+            targetLookup: UITargetLookupResult(
+                target: firstTarget,
+                metrics: searchResult.metrics
+            ),
+            failure: nil
+        )
+    }
+
+    private func ambientBatchArguments(from arguments: [String: JSONValue]) -> [String: JSONValue] {
+        var ambient: [String: JSONValue] = [:]
+        for key in Self.ambientBatchArgumentKeys {
+            if let value = arguments[key] {
+                ambient[key] = value
+            }
+        }
+        if ambient["graphID"] == nil, let sessionID = ambient["sessionID"] {
+            ambient["graphID"] = sessionID
+        }
+        return ambient
+    }
+
+    private func updatedAmbientBatchArguments(
+        from payload: JSONValue?,
+        existing: [String: JSONValue]
+    ) -> [String: JSONValue] {
+        var ambient = existing
+        guard let object = payload?.objectValue else {
+            return ambient
+        }
+        for key in Self.ambientBatchArgumentKeys {
+            if let value = object[key], value != .null {
+                ambient[key] = value
+            }
+        }
+        if ambient["graphID"] == nil, let sessionID = ambient["sessionID"] {
+            ambient["graphID"] = sessionID
+        }
+        return ambient
+    }
+
+    private func interpolateBatchArguments(
+        _ arguments: [String: JSONValue],
+        bindings: [String: JSONValue],
+        ambientArguments: [String: JSONValue],
+        lastResult: JSONValue?
+    ) -> [String: JSONValue] {
+        var resolved = ambientArguments
+        for (key, value) in arguments {
+            resolved[key] = interpolateJSONValue(
+                value,
+                bindings: bindings,
+                ambientArguments: ambientArguments,
+                lastResult: lastResult
+            )
+        }
+        if resolved["graphID"] == nil, let sessionID = resolved["sessionID"] {
+            resolved["graphID"] = sessionID
+        }
+        return resolved
+    }
+
+    private func interpolateJSONValue(
+        _ value: JSONValue,
+        bindings: [String: JSONValue],
+        ambientArguments: [String: JSONValue],
+        lastResult: JSONValue?
+    ) -> JSONValue {
+        switch value {
+        case let .string(string):
+            return interpolateTemplateString(
+                string,
+                bindings: bindings,
+                ambientArguments: ambientArguments,
+                lastResult: lastResult
+            )
+        case let .array(array):
+            return .array(
+                array.map {
+                    interpolateJSONValue(
+                        $0,
+                        bindings: bindings,
+                        ambientArguments: ambientArguments,
+                        lastResult: lastResult
+                    )
+                }
+            )
+        case let .object(object):
+            return .object(
+                object.mapValues {
+                    interpolateJSONValue(
+                        $0,
+                        bindings: bindings,
+                        ambientArguments: ambientArguments,
+                        lastResult: lastResult
+                    )
+                }
+            )
+        case .bool, .number, .null:
+            return value
+        }
+    }
+
+    private func interpolateTemplateString(
+        _ value: String,
+        bindings: [String: JSONValue],
+        ambientArguments: [String: JSONValue],
+        lastResult: JSONValue?
+    ) -> JSONValue {
+        let context = interpolationContext(
+            bindings: bindings,
+            ambientArguments: ambientArguments,
+            lastResult: lastResult
+        )
+        let pattern = #"\{\{\s*(.*?)\s*\}\}"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return .string(value)
+        }
+
+        let range = NSRange(location: 0, length: (value as NSString).length)
+        let matches = expression.matches(in: value, range: range)
+        guard matches.isEmpty == false else {
+            return .string(value)
+        }
+
+        if matches.count == 1,
+           let match = matches.first,
+           match.range == range,
+           let pathRange = Range(match.range(at: 1), in: value),
+           let resolved = resolveInterpolationPath(String(value[pathRange]), in: context)
+        {
+            return resolved
+        }
+
+        let nsValue = value as NSString
+        let rendered = NSMutableString(string: value)
+        for match in matches.reversed() {
+            let pathRange = match.range(at: 1)
+            guard pathRange.location != NSNotFound else {
+                continue
+            }
+            let path = nsValue.substring(with: pathRange)
+            guard let resolved = resolveInterpolationPath(path, in: context)
+            else {
+                continue
+            }
+            rendered.replaceCharacters(in: match.range, with: stringFragment(for: resolved))
+        }
+        return .string(rendered as String)
+    }
+
+    private func interpolationContext(
+        bindings: [String: JSONValue],
+        ambientArguments: [String: JSONValue],
+        lastResult: JSONValue?
+    ) -> [String: JSONValue] {
+        var context = bindings
+        context["env"] = .object(ambientArguments)
+        if let lastResult {
+            context["last"] = lastResult
+        }
+        return context
+    }
+
+    private func resolveInterpolationPath(
+        _ rawPath: String,
+        in context: [String: JSONValue]
+    ) -> JSONValue? {
+        let segments = interpolationSegments(from: rawPath)
+        guard let first = segments.first else { return nil }
+
+        var current: JSONValue?
+        switch first {
+        case let .key(key):
+            current = context[key]
+        case .index:
+            current = nil
+        }
+
+        for segment in segments.dropFirst() {
+            switch (current, segment) {
+            case let (.some(.object(object)), .key(key)):
+                current = object[key]
+            case let (.some(.array(array)), .index(index)) where array.indices.contains(index):
+                current = array[index]
+            default:
+                return nil
+            }
+        }
+
+        return current
+    }
+
+    private enum InterpolationSegment {
+        case key(String)
+        case index(Int)
+    }
+
+    private func interpolationSegments(from rawPath: String) -> [InterpolationSegment] {
+        let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.isEmpty == false else { return [] }
+
+        var segments: [InterpolationSegment] = []
+        var buffer = ""
+        var index = path.startIndex
+
+        func flushBuffer() {
+            guard buffer.isEmpty == false else { return }
+            segments.append(.key(buffer))
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        while index < path.endIndex {
+            let character = path[index]
+            if character == "." {
+                flushBuffer()
+                index = path.index(after: index)
+                continue
+            }
+            if character == "[" {
+                flushBuffer()
+                guard let closeIndex = path[index...].firstIndex(of: "]") else {
+                    buffer.append(character)
+                    index = path.index(after: index)
+                    continue
+                }
+                let token = path[path.index(after: index)..<closeIndex]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let arrayIndex = Int(token) {
+                    segments.append(.index(arrayIndex))
+                } else if token.isEmpty == false {
+                    segments.append(.key(token))
+                }
+                index = path.index(after: closeIndex)
+                continue
+            }
+            buffer.append(character)
+            index = path.index(after: index)
+        }
+
+        flushBuffer()
+        return segments
+    }
+
+    private func stringFragment(for value: JSONValue) -> String {
+        switch value {
+        case let .string(string):
+            return string
+        case let .number(number):
+            if number.rounded(.towardZero) == number {
+                return String(Int(number))
+            }
+            return String(number)
+        case let .bool(boolean):
+            return boolean ? "true" : "false"
+        case .null:
+            return ""
+        case .array, .object:
+            guard let data = try? JSONEncoder().encode(value) else { return "" }
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    private static let ambientBatchArgumentKeys: [String] = [
+        "pid",
+        "app",
+        "sessionID",
+        "snapshotID",
+        "graphID",
+        "scope",
+        "includeMenus",
+        "launchIfNeeded",
+        "activate",
+        "trustedSessionID",
+        "adapter",
+    ]
 
     private func isPlainTextKeys(_ raw: String) -> Bool {
         raw.isEmpty == false && raw.contains("<") == false && raw.contains(">") == false

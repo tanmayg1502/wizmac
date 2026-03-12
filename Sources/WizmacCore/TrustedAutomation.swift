@@ -96,10 +96,12 @@ public actor TrustedAutomationSessionStore {
         }
 
         if let requestedApp = request.string(for: "app") {
-            let normalizedApp = requestedApp.trimmingCharacters(in: .whitespacesAndNewlines)
-            if normalizedApp.isEmpty == false,
-               normalizedApp != activeSession.appName,
-               normalizedApp != activeSession.bundleIdentifier
+            let normalizedRequest = AppIdentityNormalizer.normalize(requestedApp)
+            let normalizedAppName = AppIdentityNormalizer.normalize(activeSession.appName)
+            let normalizedBundleIdentifier = AppIdentityNormalizer.normalize(activeSession.bundleIdentifier)
+            if normalizedRequest.isEmpty == false,
+               normalizedRequest != normalizedAppName,
+               normalizedRequest != normalizedBundleIdentifier
             {
                 return false
             }

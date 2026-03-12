@@ -50,6 +50,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "sessionID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "adapter": .string("string"),
             ]
@@ -67,6 +69,12 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "snapshotID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
+                "autoTrust": .string("boolean"),
+                "postState": .string("string"),
+                "nextQuery": .string("string"),
+                "nextLimit": .string("number"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "adapter": .string("string"),
@@ -86,6 +94,9 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "snapshotID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
+                "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "adapter": .string("string"),
@@ -106,6 +117,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "snapshotID": .string("string"),
                 "includeMenus": .string("boolean"),
                 "maxDepth": .string("number"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "adapter": .string("string"),
                 "debugTimings": .string("boolean"),
             ]
@@ -118,6 +131,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "pid": .string("number"),
                 "app": .string("string"),
                 "scope": .string("string"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "strategy": .string("string"),
                 "adapter": .string("string"),
             ]
@@ -128,11 +143,19 @@ public struct ControlPlaneToolRegistry: Sendable {
             description: "Execute a batch of UI actions against a known graph/snapshot in a single round trip.",
             schemaProperties: [
                 "actions": .string("array"),
+                "pid": .string("number"),
+                "app": .string("string"),
                 "graphID": .string("string"),
+                "sessionID": .string("string"),
                 "snapshotID": .string("string"),
+                "scope": .string("string"),
+                "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "stopOnFailure": .string("boolean"),
                 "adapter": .string("string"),
                 "debugTimings": .string("boolean"),
+                "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ],
             requiresConfirmation: true
@@ -148,6 +171,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "app": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
             ]
         ),
         .schemaBacked(
@@ -166,6 +191,9 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "snapshotID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
+                "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ],
@@ -184,6 +212,8 @@ public struct ControlPlaneToolRegistry: Sendable {
             schemaProperties: [
                 "pid": .string("number"),
                 "app": .string("string"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "debugTimings": .string("boolean"),
             ]
         ),
@@ -195,6 +225,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "targetID": .string("string"),
                 "pid": .string("number"),
                 "app": .string("string"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
             ]
         ),
         .schemaBacked(
@@ -206,6 +238,9 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "amount": .string("number"),
                 "pid": .string("number"),
                 "app": .string("string"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
+                "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ]
         ),
@@ -231,7 +266,13 @@ public struct ControlPlaneToolRegistry: Sendable {
             name: "window.focus",
             title: "Focus Window",
             description: "Raise a visible window to the foreground.",
-            schemaProperties: ["windowID": .string("number"), "title": .string("string"), "pid": .string("number")],
+            schemaProperties: [
+                "windowID": .string("number"),
+                "title": .string("string"),
+                "pid": .string("number"),
+                "autoTrust": .string("boolean"),
+                "trustedSessionID": .string("string"),
+            ],
             requiresConfirmation: true
         ),
         .schemaBacked(
@@ -250,14 +291,20 @@ public struct ControlPlaneToolRegistry: Sendable {
             name: "text.attach",
             title: "Attach Text Mode",
             description: "Attach the modal text engine to the currently focused text context.",
-            schemaProperties: ["trustedSessionID": .string("string")],
+            schemaProperties: [
+                "autoTrust": .string("boolean"),
+                "trustedSessionID": .string("string"),
+            ],
             requiresConfirmation: true
         ),
         .schemaBacked(
             name: "text.detach",
             title: "Detach Text Mode",
             description: "Detach the modal text engine from the active text context.",
-            schemaProperties: ["trustedSessionID": .string("string")],
+            schemaProperties: [
+                "autoTrust": .string("boolean"),
+                "trustedSessionID": .string("string"),
+            ],
             requiresConfirmation: true
         ),
         .schemaBacked(
@@ -266,8 +313,22 @@ public struct ControlPlaneToolRegistry: Sendable {
             description: "Insert plain text into the focused input without attaching modal text mode first.",
             schemaProperties: [
                 "text": .string("string"),
+                "targetID": .string("string"),
+                "query": .string("string"),
+                "pid": .string("number"),
+                "app": .string("string"),
+                "sessionID": .string("string"),
+                "snapshotID": .string("string"),
+                "scope": .string("string"),
+                "includeMenus": .string("boolean"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
                 "replaceSelection": .string("boolean"),
                 "submit": .string("boolean"),
+                "postState": .string("string"),
+                "nextQuery": .string("string"),
+                "nextLimit": .string("number"),
+                "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ],
@@ -280,6 +341,7 @@ public struct ControlPlaneToolRegistry: Sendable {
             schemaProperties: [
                 "keys": .string("string"),
                 "submit": .string("boolean"),
+                "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
             ],
@@ -375,6 +437,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "app": .string("string"),
                 "pid": .string("number"),
                 "durationSeconds": .string("number"),
+                "launchIfNeeded": .string("boolean"),
+                "activate": .string("boolean"),
             ]
         ),
         .schemaBacked(

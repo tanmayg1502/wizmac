@@ -69,6 +69,26 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(response.payload?["echo"]?["query"]?.stringValue, "Safari")
     }
 
+    func testDispatcherAutoTrustStartsTrustedSessionForAllowedLocalTool() async throws {
+        let router = RecordingControlPlaneRouter()
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: router)
+
+        let response = await dispatcher.callTool(
+            named: "ui.act",
+            arguments: [
+                "targetID": .string("button-1"),
+                "autoTrust": .bool(true),
+            ],
+            source: ControlPlaneSource(kind: .cli)
+        )
+
+        let requests = await router.recordedRequests()
+
+        XCTAssertEqual(response.status, .success)
+        XCTAssertEqual(requests.map(\.toolName), ["system.trusted_session_start", "ui.act"])
+        XCTAssertEqual(requests.last?.arguments["trustedSessionID"]?.stringValue, "trusted-1")
+    }
+
     func testCoreBackedRouterPropagatesRemoteSourceIntoCoreRequest() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -243,5 +263,33 @@ private actor OriginEchoExecutor: ActionExecutor {
 
     func recordedOrigins() -> [RequestOrigin] {
         origins
+    }
+}
+
+private actor RecordingControlPlaneRouter: ControlPlaneRouting {
+    private var requests: [ControlPlaneActionRequest] = []
+
+    func handle(_ request: ControlPlaneActionRequest) async throws -> ControlPlaneActionResponse {
+        requests.append(request)
+        if request.toolName == "system.trusted_session_start" {
+            return ControlPlaneActionResponse(
+                status: .success,
+                payload: .object([
+                    "trustedSessionID": .string("trusted-1"),
+                ])
+            )
+        }
+
+        return ControlPlaneActionResponse(
+            status: .success,
+            payload: .object([
+                "tool": .string(request.toolName),
+                "trustedSessionID": request.arguments["trustedSessionID"] ?? .null,
+            ])
+        )
+    }
+
+    func recordedRequests() -> [ControlPlaneActionRequest] {
+        requests
     }
 }

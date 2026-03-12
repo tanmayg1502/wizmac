@@ -578,32 +578,28 @@ private extension WizmacServiceRuntime {
             )
         }
 
-        let requestedPID = request.int(for: "pid").map(pid_t.init)
-        let requestedApp = request.string(for: "app")
-        let runningApp = requestedPID.flatMap(NSRunningApplication.init(processIdentifier:))
-            ?? NSWorkspace.shared.runningApplications.first {
-                guard let requestedApp else { return false }
-                return $0.localizedName == requestedApp || $0.bundleIdentifier == requestedApp
-            }
-            ?? NSWorkspace.shared.frontmostApplication
+        let resolution = RunningApplicationResolver.resolve(
+            pid: request.int(for: "pid").map(pid_t.init),
+            app: request.string(for: "app"),
+            launchIfNeeded: request.bool(for: "launchIfNeeded") ?? false,
+            activate: request.bool(for: "activate") ?? false,
+            fallbackToFrontmostWhenUnspecified: true
+        )
+        if let unresolvedApp = resolution.unresolvedApp {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "Could not find or launch an application matching '\(unresolvedApp)'."
+            )
+        }
 
         let duration = TimeInterval(request.int(for: "durationSeconds") ?? 600)
-        let allowedActions: [ActionName] = [
-            .uiAct,
-            .uiCopy,
-            .uiDrag,
-            .textInsert,
-            .textAttach,
-            .textSendKeys,
-            .textDetach,
-            .windowFocus,
-            .scrollStep,
-        ]
         let session = await trustedSessionStore.start(
-            appName: runningApp?.localizedName,
-            bundleIdentifier: runningApp?.bundleIdentifier,
-            processIdentifier: runningApp.map { Int($0.processIdentifier) },
-            allowedActions: allowedActions,
+            appName: resolution.appName,
+            bundleIdentifier: resolution.bundleIdentifier,
+            processIdentifier: resolution.pid.map(Int.init),
+            allowedActions: TrustedAutomationPolicy.defaultAllowedActions,
             duration: duration
         )
         trustedAutomationSession = await trustedSessionStore.status()

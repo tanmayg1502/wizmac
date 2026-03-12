@@ -72,6 +72,29 @@ final class CommandBusTests: XCTestCase {
         XCTAssertEqual(result.outcome, .success)
         XCTAssertEqual(executedRequests, [request])
     }
+
+    func testTrustedAutomationSessionNormalizesRequestedAppNames() async throws {
+        let store = TrustedAutomationSessionStore()
+        let session = await store.start(
+            appName: "WhatsApp",
+            bundleIdentifier: "net.whatsapp.WhatsApp",
+            processIdentifier: 42,
+            allowedActions: TrustedAutomationPolicy.defaultAllowedActions
+        )
+
+        let request = ActionRequest(
+            action: .uiAct,
+            arguments: [
+                "app": .string("\u{2068}WhatsApp\u{2069}"),
+                "trustedSessionID": .string(session.id.uuidString),
+            ],
+            origin: RequestOrigin(kind: .cli)
+        )
+
+        let allowed = await store.allows(request)
+
+        XCTAssertTrue(allowed)
+    }
 }
 
 private struct TestHarness {

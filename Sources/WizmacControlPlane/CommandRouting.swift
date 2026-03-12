@@ -131,13 +131,78 @@ public actor ControlPlaneDispatcher {
             )
         }
 
+        let preparedRequest = await requestWithAutoTrustIfNeeded(request)
         do {
-            return try await router.handle(request)
+            return try await router.handle(preparedRequest)
         } catch {
             return ControlPlaneActionResponse(
                 status: .failed,
                 message: error.localizedDescription
             )
+        }
+    }
+
+    private func requestWithAutoTrustIfNeeded(
+        _ request: ControlPlaneActionRequest
+    ) async -> ControlPlaneActionRequest {
+        guard request.toolName != ActionName.systemTrustedSessionStart.rawValue else {
+            return request
+        }
+        guard request.arguments["autoTrust"]?.boolValue == true else {
+            return request
+        }
+        guard request.arguments["trustedSessionID"] == nil else {
+            return request
+        }
+        guard isTrustedLocalSource(request.source) else {
+            return request
+        }
+        guard let action = ActionName(rawValue: request.toolName),
+              TrustedAutomationPolicy.defaultAllowedActions.contains(action)
+        else {
+            return request
+        }
+        guard let trustedSessionRequest = registry.request(
+            for: ActionName.systemTrustedSessionStart.rawValue,
+            arguments: trustedSessionStartArguments(from: request.arguments),
+            source: request.source
+        ) else {
+            return request
+        }
+        guard let trustedSessionID = try? await router.handle(trustedSessionRequest)
+            .payload?["trustedSessionID"]?.stringValue
+        else {
+            return request
+        }
+
+        var arguments = request.arguments
+        arguments["trustedSessionID"] = .string(trustedSessionID)
+        return ControlPlaneActionRequest(
+            correlationID: request.correlationID,
+            namespace: request.namespace,
+            action: request.action,
+            arguments: arguments,
+            source: request.source
+        )
+    }
+
+    private func trustedSessionStartArguments(
+        from arguments: [String: StructuredValue]
+    ) -> [String: StructuredValue] {
+        let keys = ["app", "pid", "launchIfNeeded", "activate"]
+        return keys.reduce(into: [:]) { partialResult, key in
+            if let value = arguments[key] {
+                partialResult[key] = value
+            }
+        }
+    }
+
+    private func isTrustedLocalSource(_ source: ControlPlaneSource) -> Bool {
+        switch source.kind {
+        case .cli, .mcp, .menuBar:
+            return true
+        case .http, .automation:
+            return false
         }
     }
 
