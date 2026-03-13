@@ -380,6 +380,8 @@ private func decode<T: Decodable>(_ type: T.Type, from value: StructuredValue) t
 }
 
 public enum ControlPlaneEnvironment {
+    static let fixtureEnvironmentKey = "WIZMAC_CONTROL_PLANE_FIXTURE"
+
     public static func makeDispatcher(
         registry: ControlPlaneToolRegistry = .default,
         router: (any ControlPlaneRouting)? = nil
@@ -387,6 +389,25 @@ public enum ControlPlaneEnvironment {
         if let router {
             return ControlPlaneDispatcher(registry: registry, router: router)
         }
+        if let fixtureRouter = fixtureRouterFromEnvironment() {
+            return ControlPlaneDispatcher(registry: registry, router: fixtureRouter)
+        }
         return ControlPlaneDispatcher(registry: registry, router: ServiceClientControlPlaneRouter())
+    }
+
+    static func fixtureRouterFromEnvironment(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> (any ControlPlaneRouting)? {
+        guard let rawConfiguration = environment[fixtureEnvironmentKey],
+              let data = rawConfiguration.data(using: .utf8),
+              let configuration = try? JSONDecoder().decode(
+                  FixtureControlPlaneEnvironmentConfiguration.self,
+                  from: data
+              )
+        else {
+            return nil
+        }
+
+        return FixtureControlPlaneRouter(configuration: configuration)
     }
 }
