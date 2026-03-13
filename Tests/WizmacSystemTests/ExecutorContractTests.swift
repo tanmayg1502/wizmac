@@ -327,6 +327,146 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(pointer.clicks.count, 1)
     }
 
+    func testUIActCanResolveQueryWithoutTargetID() async throws {
+        let target = sampleTarget(
+            id: "chat-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 10, y: 20, width: 80, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "query": .string("Family"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["sessionID"]?.stringValue, "session-1")
+        XCTAssertEqual(result.payload?.objectValue?["snapshotID"]?.stringValue, "snapshot-1")
+        XCTAssertEqual(snapshotter.searchInvocations.map(\.query), ["Family"])
+        XCTAssertTrue(snapshotter.targetLookupInvocations.isEmpty)
+        XCTAssertEqual(pointer.clicks.count, 1)
+    }
+
+    func testUIActPrefersExplicitTargetIDOverQuery() async throws {
+        let exactTarget = sampleTarget(
+            id: "exact-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 10, y: 20, width: 80, height: 24)
+        )
+        let searchTarget = sampleTarget(
+            id: "search-row",
+            title: "Family Search Result",
+            role: "AXButton",
+            rect: TargetRect(x: 40, y: 50, width: 80, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [searchTarget]), hintSession: nil)
+        snapshotter.targetsByID[exactTarget.id] = exactTarget
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "targetID": .string(exactTarget.id),
+                    "query": .string("Family Search Result"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, exactTarget.id)
+        XCTAssertEqual(snapshotter.searchInvocations.count, 0)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.id, exactTarget.id)
+        XCTAssertEqual(pointer.clicks.count, 1)
+    }
+
+    func testUIActTreatsTargetIDShapedQueryAsExactLookup() async throws {
+        let target = sampleTarget(
+            id: "VGVzdHxBWEJ1dHRvbnxGYW1pbHl8fEFYV2luZG93L0FYQnV0dG9uWzBd",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 10, y: 20, width: 80, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil, targetsByID: [target.id: target])
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "query": .string(target.id),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(snapshotter.searchInvocations.count, 0)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.id, target.id)
+        XCTAssertEqual(pointer.clicks.count, 1)
+    }
+
+    func testUICopyCanResolveQueryWithoutTargetID() async throws {
+        let target = sampleTarget(
+            id: "compose-field",
+            title: "Compose message",
+            role: "AXTextField",
+            rect: TargetRect(x: 10, y: 20, width: 160, height: 30)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiCopy,
+                arguments: [
+                    "query": .string("Compose message"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["value"]?.stringValue, "Compose message")
+        XCTAssertEqual(snapshotter.searchInvocations.map(\.query), ["Compose message"])
+        XCTAssertTrue(snapshotter.targetLookupInvocations.isEmpty)
+    }
+
+    func testUIActQueryReturnsHelpfulNotFoundWhenNoTargetMatches() async throws {
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: []), hintSession: nil)
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "query": .string("Missing target"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .notFound)
+        XCTAssertEqual(result.message, "No UI target matched 'Missing target'.")
+        XCTAssertEqual(snapshotter.searchInvocations.map(\.query), ["Missing target"])
+    }
+
     func testAirPlayDisconnectUsesDisconnectPath() async throws {
         let airPlay = AirPlayControllerStub()
         let dependencies = try makeDependencies(airPlayController: airPlay)

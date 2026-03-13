@@ -405,6 +405,132 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         return UISearchResult(snapshot: snapshot, metrics: targetLookup.metrics)
     }
 
+    private func exactUITargetLookup(
+        targetID: String,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings,
+        request: ActionRequest,
+        scope: UISearchScope,
+        includeMenus: Bool
+    ) -> UITargetLookupResult? {
+        snapshotter.target(
+            id: targetID,
+            pid: resolvedApplication.pid,
+            labelAlphabet: currentSettings.labelAlphabet,
+            sessionID: request.string(for: "sessionID"),
+            snapshotID: request.string(for: "snapshotID"),
+            scope: scope,
+            includeMenus: includeMenus
+        )
+    }
+
+    private func resolveUITarget(
+        for request: ActionRequest,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings,
+        defaultLimit: Int = 1
+    ) -> UITargetResolution {
+        let scope = searchScope(for: request)
+        let includeMenus = includeMenus(for: request)
+
+        if let requestedTargetID = request.string(for: "targetID") {
+            guard let targetLookup = exactUITargetLookup(
+                targetID: requestedTargetID,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                request: request,
+                scope: scope,
+                includeMenus: includeMenus
+            ) else {
+                return UITargetResolution(
+                    targetLookup: nil,
+                    failure: ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "Could not find a UI target matching the requested targetID."
+                    )
+                )
+            }
+
+            return UITargetResolution(targetLookup: targetLookup, failure: nil)
+        }
+
+        guard let query = request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              query.isEmpty == false
+        else {
+            return UITargetResolution(
+                targetLookup: nil,
+                failure: ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .invalidRequest,
+                    message: "Missing targetID or query."
+                )
+            )
+        }
+
+        if let exactTargetID = inferredTargetID(from: query) {
+            guard let targetLookup = exactUITargetLookup(
+                targetID: exactTargetID,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                request: request,
+                scope: scope,
+                includeMenus: includeMenus
+            ) else {
+                return UITargetResolution(
+                    targetLookup: nil,
+                    failure: ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "Could not find a UI target matching the requested targetID."
+                    )
+                )
+            }
+
+            return UITargetResolution(targetLookup: targetLookup, failure: nil)
+        }
+
+        guard let searchResult = snapshotter.search(
+            query: query,
+            pid: resolvedApplication.pid,
+            labelAlphabet: currentSettings.labelAlphabet,
+            limit: max(request.int(for: "limit") ?? defaultLimit, 1),
+            sessionID: request.string(for: "sessionID"),
+            scope: scope,
+            includeMenus: includeMenus
+        ) else {
+            return UITargetResolution(
+                targetLookup: nil,
+                failure: ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .permissionRequired,
+                    message: "Unable to inspect the requested application."
+                )
+            )
+        }
+
+        guard let firstTarget = searchResult.snapshot.targets.first else {
+            return UITargetResolution(
+                targetLookup: nil,
+                failure: ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "No UI target matched '\(query)'."
+                )
+            )
+        }
+
+        return UITargetResolution(
+            targetLookup: UITargetLookupResult(target: firstTarget, metrics: searchResult.metrics),
+            failure: nil
+        )
+    }
+
     private func inferredTargetID(from query: String) -> String? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false,
@@ -614,18 +740,21 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return unresolvedApplicationResult(for: request, app: unresolvedApp)
         }
         let pid = resolvedApplication.pid
-        guard let targetID = request.string(for: "targetID"),
-              let targetLookup = snapshotter.target(
-                id: targetID,
-                pid: pid,
-                labelAlphabet: currentSettings.labelAlphabet,
-                sessionID: request.string(for: "sessionID"),
-                snapshotID: request.string(for: "snapshotID"),
-                scope: searchScope(for: request),
-                includeMenus: includeMenus(for: request)
-              )
-        else {
-            return ActionResult(requestID: request.id, action: request.action, outcome: .notFound, message: "Target not found.")
+        let targetResolution = resolveUITarget(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+        guard let targetLookup = targetResolution.targetLookup else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: "Unable to resolve the requested UI target."
+            )
         }
 
         let interaction = request.string(for: "interaction") ?? "press"
@@ -683,19 +812,21 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         if let unresolvedApp = resolvedApplication.unresolvedApp {
             return unresolvedApplicationResult(for: request, app: unresolvedApp)
         }
-        let pid = resolvedApplication.pid
-        guard let targetID = request.string(for: "targetID"),
-              let targetLookup = snapshotter.target(
-                id: targetID,
-                pid: pid,
-                labelAlphabet: currentSettings.labelAlphabet,
-                sessionID: request.string(for: "sessionID"),
-                snapshotID: request.string(for: "snapshotID"),
-                scope: searchScope(for: request),
-                includeMenus: includeMenus(for: request)
-              )
-        else {
-            return ActionResult(requestID: request.id, action: request.action, outcome: .notFound, message: "Target not found.")
+        let targetResolution = resolveUITarget(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+        guard let targetLookup = targetResolution.targetLookup else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: "Unable to resolve the requested UI target."
+            )
         }
 
         let value = targetLookup.target.value ?? targetLookup.target.title
@@ -1437,6 +1568,11 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         case none
         case search(query: String, limit: Int)
         case capture(detail: String)
+    }
+
+    private struct UITargetResolution {
+        var targetLookup: UITargetLookupResult?
+        var failure: ActionResult?
     }
 
     private struct TextInsertTargetResolution {

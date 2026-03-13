@@ -77,6 +77,13 @@ Search the frontmost app's accessibility tree:
 swift run wizmac ui search --query Primary
 ```
 
+Capture a full app tree, then act on a discovered item in one command:
+
+```bash
+swift run wizmac ui capture --app Slack --detail full
+swift run wizmac ui act --app Slack --query "jim" --activate true
+```
+
 Call the same tool through explicit tool syntax:
 
 ```bash

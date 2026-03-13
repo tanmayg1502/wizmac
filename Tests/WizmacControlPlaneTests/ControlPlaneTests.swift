@@ -47,6 +47,19 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertTrue(tools.contains { $0["name"]?.stringValue == "system.permissions_request" })
     }
 
+    func testUIActAndUICopySchemasExposeQueryBasedResolution() throws {
+        let uiAct = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "ui.act"))
+        let uiCopy = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "ui.copy"))
+
+        let actProperties = try XCTUnwrap(uiAct.inputSchema.objectValue?["properties"]?.objectValue)
+        let copyProperties = try XCTUnwrap(uiCopy.inputSchema.objectValue?["properties"]?.objectValue)
+
+        XCTAssertEqual(actProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(actProperties["limit"]?.stringValue, "number")
+        XCTAssertEqual(copyProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(copyProperties["limit"]?.stringValue, "number")
+    }
+
     func testDispatcherCallsSharedRouter() async throws {
         let router = ClosureControlPlaneRouter { request in
             ControlPlaneActionResponse(

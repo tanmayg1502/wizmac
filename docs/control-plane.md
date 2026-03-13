@@ -195,9 +195,19 @@ Many tools share a common set of routing and execution arguments:
 - `launchIfNeeded` and `activate` for app activation behavior
 - `sessionID` and `snapshotID` for stateful UI flows
 - `targetID` to resolve a previously captured UI element exactly
+- `query` for one-shot resolution on `ui.search`, `ui.act`, `ui.copy`, and text insertion flows
 - `scope` and `includeMenus` for accessibility-tree breadth
 - `debugTimings` for instrumentation
 - `autoTrust` and `trustedSessionID` for trusted local automation
+
+Practical UI flow:
+
+```bash
+swift run wizmac ui capture --app Slack --detail full
+swift run wizmac ui act --app Slack --query "jim" --activate true
+```
+
+Use `targetID` when you already have an exact element identifier from `ui.search` or `ui.capture`. Use `query` when you want the executor to search and act in one round trip. If both are present, `targetID` wins.
 
 `system.permissions_request` currently recognizes:
 

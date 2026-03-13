@@ -61,9 +61,11 @@ public struct ControlPlaneToolRegistry: Sendable {
         .schemaBacked(
             name: "ui.act",
             title: "Act On UI Target",
-            description: "Move, click, double-click, right-click, or drag a target. Pass pid or app to target a specific app.",
+            description: "Move, click, double-click, right-click, or drag a target. Pass targetID for an exact hit from a prior tree/search result, or query to resolve and act in one step. Pass pid or app to target a specific app.",
             schemaProperties: [
                 "targetID": .string("string"),
+                "query": .string("string"),
+                "limit": .string("number"),
                 "interaction": .string("string"),
                 "pid": .string("number"),
                 "app": .string("string"),
@@ -86,9 +88,11 @@ public struct ControlPlaneToolRegistry: Sendable {
         .schemaBacked(
             name: "ui.copy",
             title: "Copy From UI",
-            description: "Copy or yank text associated with a UI target. Pass pid or app to target a specific app.",
+            description: "Copy or yank text associated with a UI target. Pass targetID for an exact hit from a prior tree/search result, or query to resolve and copy in one step. Pass pid or app to target a specific app.",
             schemaProperties: [
                 "targetID": .string("string"),
+                "query": .string("string"),
+                "limit": .string("number"),
                 "mode": .string("string"),
                 "pid": .string("number"),
                 "app": .string("string"),
