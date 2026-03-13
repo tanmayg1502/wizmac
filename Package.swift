@@ -2,6 +2,10 @@
 
 import PackageDescription
 
+let sharedSwiftSettings: [SwiftSetting] = [
+    .unsafeFlags(["-Xfrontend", "-disable-availability-checking"]),
+]
+
 let package = Package(
     name: "wizmac",
     platforms: [
@@ -20,61 +24,75 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "WizmacCore"
+            name: "WizmacCore",
+            swiftSettings: sharedSwiftSettings
         ),
         .target(
             name: "WizmacTextMode",
-            dependencies: ["WizmacCore"]
+            dependencies: ["WizmacCore"],
+            swiftSettings: sharedSwiftSettings
         ),
         .target(
             name: "WizmacSystem",
-            dependencies: ["WizmacCore", "WizmacTextMode"]
+            dependencies: ["WizmacCore", "WizmacTextMode"],
+            swiftSettings: sharedSwiftSettings
         ),
         .target(
             name: "WizmacControlPlane",
-            dependencies: ["WizmacCore", "WizmacSystem"]
+            dependencies: ["WizmacCore", "WizmacSystem"],
+            swiftSettings: sharedSwiftSettings
         ),
         .executableTarget(
             name: "WizmacCLI",
-            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"]
+            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"],
+            swiftSettings: sharedSwiftSettings
         ),
         .executableTarget(
             name: "WizmacService",
-            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"]
+            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"],
+            swiftSettings: sharedSwiftSettings
         ),
         .executableTarget(
             name: "WizmacMenuBarApp",
-            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"]
+            dependencies: ["WizmacCore", "WizmacSystem", "WizmacControlPlane"],
+            swiftSettings: sharedSwiftSettings
         ),
         .target(
             name: "WizmacFixtureHostSupport",
             dependencies: [],
-            path: "Sources/WizmacFixtureHostSupport"
+            path: "Sources/WizmacFixtureHostSupport",
+            swiftSettings: sharedSwiftSettings
         ),
         .executableTarget(
             name: "WizmacFixtureHost",
             dependencies: [],
-            path: "Sources/WizmacFixtureHost"
+            path: "Sources/WizmacFixtureHost",
+            swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "WizmacCoreTests",
-            dependencies: ["WizmacCore"]
+            dependencies: ["WizmacCore"],
+            swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "WizmacTextModeTests",
-            dependencies: ["WizmacTextMode"]
+            dependencies: ["WizmacTextMode"],
+            swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "WizmacSystemTests",
-            dependencies: ["WizmacSystem"]
+            dependencies: ["WizmacSystem"],
+            swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "WizmacControlPlaneTests",
-            dependencies: ["WizmacControlPlane"]
+            dependencies: ["WizmacControlPlane"],
+            swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "WizmacAppTests",
-            dependencies: ["WizmacMenuBarApp", "WizmacFixtureHostSupport"]
+            dependencies: ["WizmacMenuBarApp", "WizmacFixtureHostSupport"],
+            swiftSettings: sharedSwiftSettings
         ),
     ]
 )

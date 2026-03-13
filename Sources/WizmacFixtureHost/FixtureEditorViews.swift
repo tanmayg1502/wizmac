@@ -1,5 +1,8 @@
-import AppKit
+#if canImport(SwiftUI)
 import SwiftUI
+
+#if canImport(AppKit)
+import AppKit
 import WebKit
 
 struct AppKitTextFieldFixture: NSViewRepresentable {
@@ -180,3 +183,66 @@ extension WebKitEditableFixture {
         }
     }
 }
+
+#elseif canImport(SwiftUI)
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+struct AppKitTextFieldFixture: View {
+    @Binding var text: String
+
+    var body: some View {
+        TextField("AppKit NSTextField", text: $text)
+            .textFieldStyle(.roundedBorder)
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+struct AppKitTextViewFixture: View {
+    @Binding var text: String
+
+    var body: some View {
+        TextField("AppKit NSTextView", text: $text)
+            .textFieldStyle(.roundedBorder)
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+struct WebKitEditableFixture: View {
+    var onEvent: (String) -> Void
+
+    var body: some View {
+        Button("Web content unavailable") {
+            onEvent("webkit:unavailable")
+        }
+    }
+}
+
+#endif
+#else
+
+struct AppKitTextFieldFixture {
+    var text: String
+
+    init(text: String) {
+        self.text = text
+    }
+}
+
+struct AppKitTextViewFixture {
+    var text: String
+
+    init(text: String) {
+        self.text = text
+    }
+}
+
+struct WebKitEditableFixture {
+    var onEvent: (String) -> Void
+
+    init(onEvent: @escaping (String) -> Void) {
+        self.onEvent = onEvent
+    }
+}
+
+#endif
+
