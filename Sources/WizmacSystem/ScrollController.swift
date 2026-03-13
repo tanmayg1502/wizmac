@@ -114,6 +114,20 @@ public final class ScrollController: ScrollControlling {
             }
         }
 
+        // Fallback: large AXGroup or AXWebArea elements (e.g. Electron/web
+        // apps like Slack) that don't use explicit scroll roles but are still
+        // scrollable content areas.
+        if score == 0 {
+            let isLargeContainer = frame.width >= 300 && frame.height >= 200
+            if isLargeContainer {
+                if loweredRole == "axwebarea" {
+                    score = 140
+                } else if loweredRole == "axgroup" || loweredRole == "axtabgroup" {
+                    score = 80
+                }
+            }
+        }
+
         guard score > 0 else { return 0 }
 
         if frame.width >= 600 {

@@ -1504,31 +1504,52 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                 for: request,
                 direction: direction
             )
-            if matchCandidates.isEmpty == false,
-               let stabilizedMatch = await stabilizedScrollMatch(
-                   from: matchCandidates,
-                   request: request,
-                   snapshotResult: snapshotResult,
-                   resolvedApplication: resolvedApplication,
-                   currentSettings: currentSettings,
-                   direction: direction,
-                   pollIntervalMs: pollIntervalMs,
-                   maxSteps: maxSteps,
-                   observationLimit: observationLimit,
-                   stepCount: &stepCount
-               ) {
+            if matchCandidates.isEmpty == false {
+                if let stabilizedMatch = await stabilizedScrollMatch(
+                    from: matchCandidates,
+                    request: request,
+                    snapshotResult: snapshotResult,
+                    resolvedApplication: resolvedApplication,
+                    currentSettings: currentSettings,
+                    direction: direction,
+                    pollIntervalMs: pollIntervalMs,
+                    maxSteps: maxSteps,
+                    observationLimit: observationLimit,
+                    stepCount: &stepCount
+                ) {
+                    return ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .success,
+                        message: "Found matching UI target while scrolling.",
+                        payload: [
+                            "target": stabilizedMatch.target.payload,
+                            "targetID": .string(stabilizedMatch.target.id),
+                            "stepCount": .number(Double(stepCount)),
+                            "sessionID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                            "snapshotID": stabilizedMatch.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+                            "graphID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                        ]
+                    )
+                }
+
+                // Target was found but could not be stabilized into a comfortable
+                // viewport position. Return it anyway instead of continuing to
+                // scroll past it, which causes the oscillation bug where the loop
+                // scrolls away from the already-visible target.
+                let bestMatch = matchCandidates[0].0
                 return ActionResult(
                     requestID: request.id,
                     action: request.action,
                     outcome: .success,
                     message: "Found matching UI target while scrolling.",
                     payload: [
-                        "target": stabilizedMatch.target.payload,
-                        "targetID": .string(stabilizedMatch.target.id),
+                        "target": bestMatch.payload,
+                        "targetID": .string(bestMatch.id),
                         "stepCount": .number(Double(stepCount)),
-                        "sessionID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
-                        "snapshotID": stabilizedMatch.snapshot.snapshotID.map(JSONValue.string) ?? .null,
-                        "graphID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                        "sessionID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                        "snapshotID": snapshotResult.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+                        "graphID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
                     ]
                 )
             }
