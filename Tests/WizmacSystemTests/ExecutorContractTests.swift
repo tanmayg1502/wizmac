@@ -188,6 +188,80 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(result.outcome, .notFound)
     }
 
+    func testUISearchResolvesExplicitTargetIDThroughTargetLookup() async throws {
+        let target = sampleTarget(id: "button-1", title: "Primary Action", role: "AXButton")
+        let snapshot = sampleSnapshot(targets: [target])
+        let snapshotter = SnapshotterStub(snapshot: snapshot, hintSession: nil, targetsByID: [target.id: target])
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiSearch,
+                arguments: [
+                    "targetID": .string(target.id),
+                    "sessionID": .string("session-1"),
+                    "snapshotID": .string("snapshot-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(snapshotter.searchInvocations.count, 0)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.id, target.id)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.sessionID, "session-1")
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.snapshotID, "snapshot-1")
+        XCTAssertEqual(result.payload?.objectValue?["targets"]?.arrayValue?.first?.objectValue?["id"]?.stringValue, target.id)
+    }
+
+    func testUISearchTreatsTargetIDShapedQueryAsExactLookup() async throws {
+        let target = sampleTarget(
+            id: "VGVzdHxBWEJ1dHRvbnxQcmltYXJ5IEFjdGlvbnx8QVhXaW5kb3cvQVhCdXR0b25bMF0=",
+            title: "Primary Action",
+            role: "AXButton"
+        )
+        let snapshot = sampleSnapshot(targets: [target])
+        let snapshotter = SnapshotterStub(snapshot: snapshot, hintSession: nil, targetsByID: [target.id: target])
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiSearch,
+                arguments: [
+                    "query": .string(target.id),
+                    "sessionID": .string("session-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(snapshotter.searchInvocations.count, 0)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.id, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["targets"]?.arrayValue?.first?.objectValue?["id"]?.stringValue, target.id)
+    }
+
+    func testUISearchTargetIDShapedQueryReturnsNotFoundInsteadOfFuzzyFallback() async throws {
+        let missingTargetID = "VGVzdHxBWEJ1dHRvbnxNaXNzaW5nfHxBWFdpbmRvdy9BWEJ1dHRvblswXXwxMDA6MTAwOjYwOjMw"
+        let snapshot = sampleSnapshot(targets: [sampleTarget(id: "button-1", title: "Compose", role: "AXButton")])
+        let snapshotter = SnapshotterStub(snapshot: snapshot, hintSession: nil, targetsByID: [:])
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiSearch,
+                arguments: [
+                    "query": .string(missingTargetID),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .notFound)
+        XCTAssertEqual(snapshotter.searchInvocations.count, 0)
+        XCTAssertEqual(snapshotter.targetLookupInvocations.first?.id, missingTargetID)
+    }
+
     func testUICaptureRawReturnsDebugPayloadForTarget() async throws {
         let target = sampleTarget(id: "button-1", title: "Primary Action", role: "AXButton")
         let snapshot = sampleSnapshot(targets: [target])

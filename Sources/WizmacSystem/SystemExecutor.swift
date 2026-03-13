@@ -288,6 +288,62 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let scope = searchScope(for: request)
         let includeMenus = includeMenus(for: request)
+        let requestedTargetID = request.string(for: "targetID")
+
+        if let requestedTargetID {
+            guard let exactSearchResult = exactUISearchResult(
+                targetID: requestedTargetID,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                request: request,
+                scope: scope,
+                includeMenus: includeMenus
+            ) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "Could not find a UI target matching the requested targetID."
+                )
+            }
+
+            let payload = uiSearchPayload(exactSearchResult, includeDebugTimings: debugTimingsRequested(for: request))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .success,
+                message: "Found \(exactSearchResult.snapshot.targets.count) UI target(s).",
+                payload: payload
+            )
+        }
+
+        if let exactTargetID = inferredTargetID(from: query) {
+            guard let exactSearchResult = exactUISearchResult(
+                targetID: exactTargetID,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                request: request,
+                scope: scope,
+                includeMenus: includeMenus
+            ) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "Could not find a UI target matching the requested targetID."
+                )
+            }
+
+            let payload = uiSearchPayload(exactSearchResult, includeDebugTimings: debugTimingsRequested(for: request))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .success,
+                message: "Found \(exactSearchResult.snapshot.targets.count) UI target(s).",
+                payload: payload
+            )
+        }
+
         let searchResult = snapshotter.search(
             query: query,
             pid: pid,
@@ -315,6 +371,50 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             message: "Found \(searchResult.snapshot.targets.count) UI target(s).",
             payload: payload
         )
+    }
+
+    private func exactUISearchResult(
+        targetID: String,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings,
+        request: ActionRequest,
+        scope: UISearchScope,
+        includeMenus: Bool
+    ) -> UISearchResult? {
+        guard let targetLookup = snapshotter.target(
+            id: targetID,
+            pid: resolvedApplication.pid,
+            labelAlphabet: currentSettings.labelAlphabet,
+            sessionID: request.string(for: "sessionID"),
+            snapshotID: request.string(for: "snapshotID"),
+            scope: scope,
+            includeMenus: includeMenus
+        ) else {
+            return nil
+        }
+
+        let snapshot = TargetSnapshot(
+            appName: targetLookup.metrics.appName,
+            bundleIdentifier: resolvedApplication.bundleIdentifier,
+            windowTitle: targetLookup.metrics.windowTitle,
+            sessionID: targetLookup.metrics.sessionID,
+            snapshotID: targetLookup.metrics.snapshotID,
+            generatedAt: targetLookup.metrics.lastRefreshedAt,
+            targets: [targetLookup.target]
+        )
+        return UISearchResult(snapshot: snapshot, metrics: targetLookup.metrics)
+    }
+
+    private func inferredTargetID(from query: String) -> String? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false,
+              let data = Data(base64Encoded: trimmed),
+              let decoded = String(data: data, encoding: .utf8),
+              decoded.contains("|AX")
+        else {
+            return nil
+        }
+        return trimmed
     }
 
     private func uiCaptureResult(for request: ActionRequest) async -> ActionResult {

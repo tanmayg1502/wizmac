@@ -941,39 +941,295 @@ enum AXDebugValueSerializer {
 }
 
 enum FuzzyMatcher {
+    private struct SearchTextComponents {
+        let raw: String
+        let normalized: String
+        let mentionAgnosticNormalized: String
+        let tokens: [String]
+        let mentionAgnosticTokens: [String]
+
+        init(_ text: String) {
+            raw = text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            normalized = Self.normalizedText(from: raw)
+            mentionAgnosticNormalized = Self.mentionAgnosticText(from: normalized)
+            tokens = normalized.split(whereSeparator: \.isWhitespace).map(String.init)
+            mentionAgnosticTokens = mentionAgnosticNormalized.split(whereSeparator: \.isWhitespace).map(String.init)
+        }
+
+        private static func normalizedText(from text: String) -> String {
+            var scalars: [UnicodeScalar] = []
+            var previousWasSpace = false
+
+            for scalar in text.unicodeScalars {
+                if CharacterSet.alphanumerics.contains(scalar) || scalar == "@" || scalar == "#" {
+                    scalars.append(scalar)
+                    previousWasSpace = false
+                } else if previousWasSpace == false {
+                    scalars.append(" ")
+                    previousWasSpace = true
+                }
+            }
+
+            return String(String.UnicodeScalarView(scalars))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private static func mentionAgnosticText(from normalizedText: String) -> String {
+            normalizedText
+                .split(whereSeparator: \.isWhitespace)
+                .map { token -> String in
+                    var next = String(token)
+                    while next.hasPrefix("@") || next.hasPrefix("#") {
+                        next.removeFirst()
+                    }
+                    return next
+                }
+                .joined(separator: " ")
+        }
+    }
+
     static func score(query: String, in target: TargetDescriptor) -> Int {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false else { return 1 }
+        let directScore = directTextScore(query: query, in: target)
+        if directScore > 0 {
+            return directScore + directMatchPriority(for: target)
+        }
 
-        let haystack = [
-            target.title,
-            target.subtitle ?? "",
+        return structuralScore(query: query, in: target)
+    }
+
+    static func directTextScore(query: String, in target: TargetDescriptor) -> Int {
+        let queryComponents = SearchTextComponents(query)
+        guard queryComponents.raw.isEmpty == false else { return 0 }
+
+        let fields = searchableFields(for: target)
+        let fieldBiases = [20, 18, 14]
+
+        return zip(fields, fieldBiases)
+            .map { field, fieldBias in
+                fieldMatchScore(field: field, query: queryComponents, fieldBias: fieldBias)
+            }
+            .max() ?? 0
+    }
+
+    static func structuralScore(query: String, in target: TargetDescriptor) -> Int {
+        let queryComponents = SearchTextComponents(query)
+        guard queryComponents.raw.isEmpty == false else { return 0 }
+
+        let roleComponents = SearchTextComponents(target.role)
+        var bestScore = 0
+
+        if roleComponents.raw == queryComponents.raw || roleComponents.normalized == queryComponents.normalized {
+            bestScore = 36
+        } else if queryComponents.raw.count >= 3,
+                  roleComponents.raw.contains(queryComponents.raw) ||
+                    (queryComponents.normalized.isEmpty == false && roleComponents.normalized.contains(queryComponents.normalized)) {
+            bestScore = 24
+        }
+
+        let pathComponents = SearchTextComponents(target.path.joined(separator: " "))
+        let pathTokenScore = min(tokenCoverageScore(queryTokens: queryComponents.tokens, fieldTokens: pathComponents.tokens), 18)
+        bestScore = max(bestScore, pathTokenScore)
+
+        return bestScore
+    }
+
+    static func exactMatchScore(query: String, in target: TargetDescriptor) -> Int {
+        let queryComponents = SearchTextComponents(query)
+        guard queryComponents.raw.isEmpty == false else { return 0 }
+
+        let bestFieldScore = searchableFields(for: target)
+            .map { exactFieldScore(field: $0, query: queryComponents) }
+            .max() ?? 0
+        guard bestFieldScore > 0 else { return 0 }
+
+        return bestFieldScore + directMatchPriority(for: target)
+    }
+
+    static func isExactMatch(query: String, in target: TargetDescriptor) -> Bool {
+        exactMatchScore(query: query, in: target) > 0
+    }
+
+    static func searchableFields(for target: TargetDescriptor) -> [String] {
+        [
+            meaningfulTitle(for: target),
             target.value ?? "",
-            target.role,
-            target.path.joined(separator: " "),
+            target.subtitle ?? "",
         ]
-        .joined(separator: " ")
-        .lowercased()
+    }
 
-        let tokens = trimmed.lowercased().split(whereSeparator: \.isWhitespace)
-        guard tokens.isEmpty == false else { return 0 }
+    private static func fieldMatchScore(field: String, query: SearchTextComponents, fieldBias: Int) -> Int {
+        let fieldComponents = SearchTextComponents(field)
+        guard fieldComponents.raw.isEmpty == false else { return 0 }
 
         var score = 0
-        for token in tokens {
-            if haystack.contains(token) {
-                score += 10
-            } else if token.allSatisfy({ haystack.contains($0) }) {
-                score += 3
-            } else {
-                return 0
+
+        if fieldComponents.raw == query.raw {
+            score = max(score, 180)
+        } else if fieldComponents.normalized == query.normalized, query.normalized.isEmpty == false {
+            score = max(score, 175)
+        }
+
+        if query.raw.count >= 2 {
+            if fieldComponents.raw.hasPrefix(query.raw) {
+                score = max(score, 145)
+            } else if query.normalized.isEmpty == false, fieldComponents.normalized.hasPrefix(query.normalized) {
+                score = max(score, 140)
+            }
+
+            if fieldComponents.raw.contains(query.raw) {
+                score = max(score, 130)
+            } else if query.normalized.isEmpty == false, fieldComponents.normalized.contains(query.normalized) {
+                score = max(score, 125)
             }
         }
 
-        if haystack.hasPrefix(trimmed.lowercased()) {
-            score += 5
+        if query.mentionAgnosticNormalized.isEmpty == false,
+           fieldComponents.mentionAgnosticNormalized.isEmpty == false {
+            if fieldComponents.mentionAgnosticNormalized == query.mentionAgnosticNormalized {
+                score = max(score, 116)
+            } else if fieldComponents.mentionAgnosticNormalized.hasPrefix(query.mentionAgnosticNormalized) {
+                score = max(score, 104)
+            } else if fieldComponents.mentionAgnosticNormalized.contains(query.mentionAgnosticNormalized) {
+                score = max(score, 96)
+            }
         }
 
+        let tokenScore = tokenCoverageScore(queryTokens: query.tokens, fieldTokens: fieldComponents.tokens)
+        if tokenScore > 0 {
+            score = max(score, tokenScore)
+        }
+
+        let mentionAgnosticTokenScore = tokenCoverageScore(
+            queryTokens: query.mentionAgnosticTokens,
+            fieldTokens: fieldComponents.mentionAgnosticTokens
+        )
+        if mentionAgnosticTokenScore > 0 {
+            score = max(score, max(mentionAgnosticTokenScore - 8, 0))
+        }
+
+        return score > 0 ? score + fieldBias : 0
+    }
+
+    private static func tokenCoverageScore(queryTokens: [String], fieldTokens: [String]) -> Int {
+        guard queryTokens.isEmpty == false, fieldTokens.isEmpty == false else { return 0 }
+
+        var exactMatches = 0
+        var prefixMatches = 0
+
+        for token in queryTokens {
+            if fieldTokens.contains(token) {
+                exactMatches += 1
+                continue
+            }
+
+            if token.count >= 4,
+               fieldTokens.contains(where: { fieldToken in
+                   fieldToken.count >= 4 && (fieldToken.hasPrefix(token) || token.hasPrefix(fieldToken))
+               }) {
+                prefixMatches += 1
+            }
+        }
+
+        let totalMatches = exactMatches + prefixMatches
+        guard totalMatches > 0 else { return 0 }
+
+        var score = (exactMatches * 14) + (prefixMatches * 6)
+        if totalMatches == queryTokens.count {
+            score += 28
+        }
+        if exactMatches == queryTokens.count {
+            score += 20
+        }
+        if tokensAppearInOrder(queryTokens: queryTokens, fieldTokens: fieldTokens) {
+            score += 10
+        }
+        if queryTokens.count == 1, exactMatches == 1 {
+            score += 16
+        }
         return score
+    }
+
+    private static func tokensAppearInOrder(queryTokens: [String], fieldTokens: [String]) -> Bool {
+        guard queryTokens.isEmpty == false, fieldTokens.isEmpty == false else { return false }
+
+        var cursor = 0
+        for fieldToken in fieldTokens {
+            guard cursor < queryTokens.count else { break }
+            let queryToken = queryTokens[cursor]
+            let orderedMatch = fieldToken == queryToken ||
+                (queryToken.count >= 4 && fieldToken.count >= 4 && (fieldToken.hasPrefix(queryToken) || queryToken.hasPrefix(fieldToken)))
+            if orderedMatch {
+                cursor += 1
+            }
+        }
+        return cursor == queryTokens.count
+    }
+
+    private static func exactFieldScore(field: String, query: SearchTextComponents) -> Int {
+        let fieldComponents = SearchTextComponents(field)
+        guard fieldComponents.raw.isEmpty == false else { return 0 }
+
+        if fieldComponents.raw == query.raw || (query.normalized.isEmpty == false && fieldComponents.normalized == query.normalized) {
+            return 160
+        }
+
+        if query.mentionAgnosticNormalized.isEmpty == false,
+           fieldComponents.mentionAgnosticNormalized == query.mentionAgnosticNormalized {
+            return 108
+        }
+
+        if query.raw.count >= 3 {
+            if fieldComponents.raw.hasPrefix(query.raw) {
+                return 120
+            }
+            if query.normalized.isEmpty == false, fieldComponents.normalized.hasPrefix(query.normalized) {
+                return 115
+            }
+            if query.mentionAgnosticNormalized.isEmpty == false,
+               fieldComponents.mentionAgnosticNormalized.hasPrefix(query.mentionAgnosticNormalized) {
+                return 92
+            }
+        }
+
+        if query.raw.count >= 4,
+           (fieldComponents.raw.contains(query.raw) ||
+                (query.normalized.isEmpty == false && fieldComponents.normalized.contains(query.normalized))),
+           fieldComponents.raw.count <= query.raw.count + 8 {
+            return 100
+        }
+
+        if query.mentionAgnosticNormalized.count >= 3,
+           fieldComponents.mentionAgnosticNormalized.contains(query.mentionAgnosticNormalized),
+           fieldComponents.mentionAgnosticNormalized.count <= query.mentionAgnosticNormalized.count + 8 {
+            return 84
+        }
+
+        return 0
+    }
+
+    private static func meaningfulTitle(for target: TargetDescriptor) -> String {
+        let trimmedTitle = target.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedTitle.isEmpty == false else { return "" }
+        if trimmedTitle.caseInsensitiveCompare(target.role) == .orderedSame {
+            return ""
+        }
+        return trimmedTitle
+    }
+
+    private static func directMatchPriority(for target: TargetDescriptor) -> Int {
+        let loweredRole = target.role.lowercased()
+        if loweredRole.contains("radio") || loweredRole.contains("checkbox") || loweredRole.contains("button") || loweredRole.contains("popup") {
+            return 20
+        }
+        if loweredRole.contains("link") {
+            return 16
+        }
+        if loweredRole.contains("text") || loweredRole.contains("heading") || loweredRole.contains("row") || loweredRole.contains("cell") {
+            return 12
+        }
+        return 0
     }
 }
 
@@ -985,21 +1241,60 @@ enum SemanticTargetRanker {
         let proximity: Double
     }
 
+    private static let exactMatchBonus = 1000
+    private static let directMatchBonus = 700
+    private static let strongAnchorMinimum = 100
+    private static let siblingBoostMinimum = 100
+
     static func rankedTargets(in snapshot: TargetSnapshot, query: String, limit: Int) -> [TargetDescriptor] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedQuery.isEmpty == false else {
             return Array(snapshot.targets.prefix(limit))
         }
 
-        let directScores = snapshot.targets.reduce(into: [String: Int]()) { scores, target in
-            let score = FuzzyMatcher.score(query: trimmedQuery, in: target)
+        let exactMatches = snapshot.targets
+            .filter { FuzzyMatcher.isExactMatch(query: trimmedQuery, in: $0) }
+            .sorted { lhs, rhs in
+                let leftScore = FuzzyMatcher.exactMatchScore(query: trimmedQuery, in: lhs)
+                let rightScore = FuzzyMatcher.exactMatchScore(query: trimmedQuery, in: rhs)
+                if leftScore != rightScore {
+                    return leftScore > rightScore
+                }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+        let exactMatchIDs = Set(exactMatches.map(\.id))
+
+        let directTextScores = snapshot.targets.reduce(into: [String: Int]()) { scores, target in
+            let score = FuzzyMatcher.directTextScore(query: trimmedQuery, in: target)
             if score > 0 {
                 scores[target.id] = score
             }
         }
 
+        let structuralScores = snapshot.targets.reduce(into: [String: Int]()) { scores, target in
+            guard directTextScores[target.id] == nil else { return }
+            let score = FuzzyMatcher.structuralScore(query: trimmedQuery, in: target)
+            if score > 0 {
+                scores[target.id] = score
+            }
+        }
+
+        let directScores = snapshot.targets.reduce(into: structuralScores) { scores, target in
+            guard let directTextScore = directTextScores[target.id] else { return }
+            if FuzzyMatcher.isExactMatch(query: trimmedQuery, in: target) {
+                scores[target.id] = directTextScore + exactMatchBonus
+            } else {
+                scores[target.id] = directTextScore + directMatchBonus
+            }
+        }
+
         let anchors = snapshot.targets.compactMap { target -> (TargetDescriptor, Int)? in
-            guard let score = directScores[target.id], isTextualAnchor(target) else { return nil }
+            guard let score = directTextScores[target.id], score >= strongAnchorMinimum, isTextualAnchor(target) else { return nil }
+            return (target, score)
+        }
+
+        let directMatchTargets = snapshot.targets.compactMap { target -> (TargetDescriptor, Int)? in
+            guard let score = directTextScores[target.id], score >= siblingBoostMinimum else { return nil }
             return (target, score)
         }
 
@@ -1009,15 +1304,21 @@ enum SemanticTargetRanker {
                 guard adjacentScore > 0 else { continue }
                 scores[target.id] = max(scores[target.id] ?? 0, adjacentScore)
             }
+            if scores[target.id] == nil {
+                let siblingScore = containerSiblingScore(candidate: target, directMatches: directMatchTargets)
+                if siblingScore > 0 {
+                    scores[target.id] = siblingScore
+                }
+            }
         }
 
-        return snapshot.targets
+        let rankedTargets = snapshot.targets
             .compactMap { target -> RankedTarget? in
                 guard let score = combinedScores[target.id], score > 0 else { return nil }
                 return RankedTarget(
                     target: target,
                     score: score,
-                    directMatch: directScores[target.id] != nil,
+                    directMatch: directTextScores[target.id] != nil,
                     proximity: nearestAnchorDistance(for: target, anchors: anchors.map(\.0))
                 )
             }
@@ -1033,8 +1334,9 @@ enum SemanticTargetRanker {
                 }
                 return lhs.target.title.localizedCaseInsensitiveCompare(rhs.target.title) == .orderedAscending
             }
-            .prefix(limit)
             .map(\.target)
+
+        return Array((exactMatches + rankedTargets.filter { exactMatchIDs.contains($0.id) == false }).prefix(limit))
     }
 
     private static func adjacentActionScore(candidate: TargetDescriptor, anchor: TargetDescriptor, anchorScore: Int) -> Int {
@@ -1081,14 +1383,33 @@ enum SemanticTargetRanker {
         return score
     }
 
+    private static func containerSiblingScore(candidate: TargetDescriptor, directMatches: [(TargetDescriptor, Int)]) -> Int {
+        for (match, matchScore) in directMatches {
+            guard candidate.id != match.id else { continue }
+            let candidateParent = candidate.path.dropLast()
+            let matchParent = match.path.dropLast()
+            guard candidateParent.count >= 3,
+                  Array(candidateParent) == Array(matchParent) else { continue }
+            return min(matchScore, 15) + 50
+        }
+        return 0
+    }
+
     private static func isTextualAnchor(_ target: TargetDescriptor) -> Bool {
         let loweredRole = target.role.lowercased()
-        let searchableText = [target.title, target.subtitle ?? "", target.value ?? ""]
+        let searchableText = FuzzyMatcher.searchableFields(for: target)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard searchableText.isEmpty == false else { return false }
-        return loweredRole.contains("text") || loweredRole.contains("row") || loweredRole.contains("cell")
+
+        if loweredRole.contains("text") || loweredRole.contains("row") || loweredRole.contains("cell") {
+            return true
+        }
+        if loweredRole.contains("button") || loweredRole.contains("link") {
+            return searchableText.count >= 2
+        }
+        return false
     }
 
     private static func isAdjacentActionableCandidate(_ target: TargetDescriptor) -> Bool {
@@ -1114,5 +1435,260 @@ enum SemanticTargetRanker {
             return Double((dx * dx) + (dy * dy)).squareRoot()
         }
         .min() ?? .greatestFiniteMagnitude
+    }
+}
+
+struct StableTargetIdentity: Sendable, Equatable {
+    var appName: String
+    var role: String
+    var title: String
+    var value: String?
+    var path: [String]
+    var frame: TargetRect?
+
+    static func decode(from targetID: String) -> StableTargetIdentity? {
+        guard let data = Data(base64Encoded: targetID),
+              let raw = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+
+        let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 6 else { return nil }
+
+        let appName = parts[0]
+        let role = parts[1]
+        let path = parts[parts.count - 2].split(separator: "/").map(String.init)
+        let frame = decodeFrame(parts[parts.count - 1])
+        let middleComponents = Array(parts[2..<(parts.count - 2)])
+
+        let title: String
+        let value: String?
+        switch middleComponents.count {
+        case 0:
+            title = ""
+            value = nil
+        case 1:
+            title = middleComponents[0]
+            value = nil
+        default:
+            title = middleComponents.dropLast().joined(separator: "|")
+            let resolvedValue = middleComponents.last ?? ""
+            value = resolvedValue.isEmpty ? nil : resolvedValue
+        }
+
+        return StableTargetIdentity(
+            appName: appName,
+            role: role,
+            title: title,
+            value: value,
+            path: path,
+            frame: frame
+        )
+    }
+
+    private static func decodeFrame(_ raw: String) -> TargetRect? {
+        guard raw != "noframe" else { return nil }
+        let values = raw.split(separator: ":").compactMap { Double($0) }
+        guard values.count == 4 else { return nil }
+        return TargetRect(x: values[0], y: values[1], width: values[2], height: values[3])
+    }
+}
+
+enum StableTargetResolver {
+    private static let minimumResolutionScore = 170
+
+    static func resolve(targetID: String, in snapshot: TargetSnapshot) -> TargetDescriptor? {
+        guard let identity = StableTargetIdentity.decode(from: targetID) else { return nil }
+
+        let candidates = snapshot.targets.compactMap { target -> (TargetDescriptor, Int)? in
+            guard let score = resolutionScore(for: target, identity: identity) else { return nil }
+            return (target, score)
+        }
+        .sorted { lhs, rhs in
+            if lhs.1 != rhs.1 {
+                return lhs.1 > rhs.1
+            }
+            return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+        }
+
+        guard let best = candidates.first, best.1 >= minimumResolutionScore else { return nil }
+        return best.0
+    }
+
+    private static func resolutionScore(for target: TargetDescriptor, identity: StableTargetIdentity) -> Int? {
+        guard normalized(target.role) == normalized(identity.role) else { return nil }
+
+        var score = 90
+
+        if identity.appName.isEmpty == false, normalized(target.appName) == normalized(identity.appName) {
+            score += 15
+        }
+
+        let textScore = textResolutionScore(for: target, identity: identity)
+        let pathScore = pathResolutionScore(target.path, identity.path)
+        let frameScore = frameResolutionScore(target.frame, identity.frame)
+
+        guard textScore > 0 || pathScore >= 40 || frameScore >= 20 else { return nil }
+        return score + textScore + pathScore + frameScore
+    }
+
+    private static func textResolutionScore(for target: TargetDescriptor, identity: StableTargetIdentity) -> Int {
+        let candidateFields = FuzzyMatcher.searchableFields(for: target)
+        var score = 0
+
+        if identity.title.isEmpty == false {
+            score += bestFieldResolutionScore(identity.title, candidateFields)
+        }
+
+        if let value = identity.value, value.isEmpty == false {
+            score += bestFieldResolutionScore(value, candidateFields)
+        }
+
+        return score
+    }
+
+    private static func bestFieldResolutionScore(_ query: String, _ fields: [String]) -> Int {
+        fields.map { fieldResolutionScore(query: query, field: $0) }.max() ?? 0
+    }
+
+    private static func fieldResolutionScore(query: String, field: String) -> Int {
+        let queryComponents = SearchComponents(query)
+        let fieldComponents = SearchComponents(field)
+        guard queryComponents.raw.isEmpty == false, fieldComponents.raw.isEmpty == false else { return 0 }
+
+        if fieldComponents.raw == queryComponents.raw || fieldComponents.normalized == queryComponents.normalized {
+            return 90
+        }
+        if fieldComponents.raw.hasPrefix(queryComponents.raw) ||
+            (queryComponents.normalized.isEmpty == false && fieldComponents.normalized.hasPrefix(queryComponents.normalized)) {
+            return 68
+        }
+        if fieldComponents.raw.contains(queryComponents.raw) ||
+            (queryComponents.normalized.isEmpty == false && fieldComponents.normalized.contains(queryComponents.normalized)) {
+            return 52
+        }
+
+        let tokenScore = tokenResolutionScore(queryTokens: queryComponents.tokens, fieldTokens: fieldComponents.tokens)
+        return tokenScore
+    }
+
+    private static func tokenResolutionScore(queryTokens: [String], fieldTokens: [String]) -> Int {
+        guard queryTokens.isEmpty == false, fieldTokens.isEmpty == false else { return 0 }
+
+        var exactMatches = 0
+        var prefixMatches = 0
+        for token in queryTokens {
+            if fieldTokens.contains(token) {
+                exactMatches += 1
+            } else if token.count >= 4,
+                      fieldTokens.contains(where: { fieldToken in
+                          fieldToken.count >= 4 && (fieldToken.hasPrefix(token) || token.hasPrefix(fieldToken))
+                      }) {
+                prefixMatches += 1
+            }
+        }
+
+        let totalMatches = exactMatches + prefixMatches
+        guard totalMatches > 0 else { return 0 }
+
+        var score = (exactMatches * 20) + (prefixMatches * 10)
+        if totalMatches == queryTokens.count {
+            score += 20
+        }
+        return score
+    }
+
+    private static func pathResolutionScore(_ candidatePath: [String], _ identityPath: [String]) -> Int {
+        guard candidatePath.isEmpty == false, identityPath.isEmpty == false else { return 0 }
+
+        let normalizedCandidate = candidatePath.map(normalizedPathSegment)
+        let normalizedIdentity = identityPath.map(normalizedPathSegment)
+
+        let sharedSuffix = sharedSuffixLength(normalizedCandidate, normalizedIdentity)
+        let sharedPrefix = zip(normalizedCandidate, normalizedIdentity).prefix { $0 == $1 }.count
+        var score = (sharedSuffix * 18) + (sharedPrefix * 4)
+
+        if normalizedCandidate.last == normalizedIdentity.last {
+            score += 12
+        }
+
+        return score
+    }
+
+    private static func frameResolutionScore(_ candidateFrame: TargetRect?, _ identityFrame: TargetRect?) -> Int {
+        guard let candidateRect = candidateFrame?.cgRect, let identityRect = identityFrame?.cgRect else { return 0 }
+
+        let centerDistance = hypot(candidateRect.midX - identityRect.midX, candidateRect.midY - identityRect.midY)
+        let sizeDistance = abs(candidateRect.width - identityRect.width) + abs(candidateRect.height - identityRect.height)
+
+        var score = 0
+        switch centerDistance {
+        case ...40:
+            score += 44
+        case ...90:
+            score += 30
+        case ...180:
+            score += 16
+        default:
+            break
+        }
+
+        switch sizeDistance {
+        case ...8:
+            score += 18
+        case ...20:
+            score += 10
+        default:
+            break
+        }
+
+        return score
+    }
+
+    private static func normalized(_ value: String) -> String {
+        SearchComponents(value).normalized
+    }
+
+    private static func normalizedPathSegment(_ segment: String) -> String {
+        let withoutIndex = segment.replacingOccurrences(of: "\\[\\d+\\]", with: "", options: .regularExpression)
+        return normalized(withoutIndex)
+    }
+
+    private static func sharedSuffixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        let reversedPairs = zip(lhs.reversed(), rhs.reversed())
+        return reversedPairs.prefix { $0 == $1 }.count
+    }
+
+    private struct SearchComponents {
+        let raw: String
+        let normalized: String
+        let tokens: [String]
+
+        init(_ text: String) {
+            raw = text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            normalized = Self.normalizedText(from: raw)
+            tokens = normalized.split(whereSeparator: \.isWhitespace).map(String.init)
+        }
+
+        private static func normalizedText(from text: String) -> String {
+            var scalars: [UnicodeScalar] = []
+            var previousWasSpace = false
+
+            for scalar in text.unicodeScalars {
+                if CharacterSet.alphanumerics.contains(scalar) || scalar == "@" || scalar == "#" {
+                    scalars.append(scalar)
+                    previousWasSpace = false
+                } else if previousWasSpace == false {
+                    scalars.append(" ")
+                    previousWasSpace = true
+                }
+            }
+
+            return String(String.UnicodeScalarView(scalars))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 }

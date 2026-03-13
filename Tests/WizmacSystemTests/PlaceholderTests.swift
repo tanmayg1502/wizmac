@@ -82,8 +82,10 @@ final class SupportAndControllerTests: XCTestCase {
 
         let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "Complete the test group project", limit: 10)
 
-        XCTAssertEqual(ranked.first?.id, checkbox.id)
-        XCTAssertTrue(ranked.map(\.id).contains(taskTitle.id))
+        // Direct match (taskTitle) now ranks first; adjacent checkbox ranks second
+        XCTAssertEqual(ranked.first?.id, taskTitle.id)
+        XCTAssertTrue(ranked.count >= 2)
+        XCTAssertEqual(ranked[1].id, checkbox.id)
         XCTAssertFalse(ranked.map(\.id).contains(headerButton.id))
     }
 
@@ -156,6 +158,339 @@ Timestamp     A/R    Flags  if Domain               Service Type         Instanc
         let devices = AirPlayController.parseDevices(from: output)
 
         XCTAssertEqual(devices, ["Living Room TV", "Studio Display"])
+    }
+
+    // MARK: - SemanticTargetRanker: Direct Match Priority Tests
+
+    func testDirectMatchRanksAboveAdjacentElements() {
+        let jimButton = TargetDescriptor(
+            id: "jim-button", appName: "Slack", role: "AXButton",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 200, width: 150, height: 30),
+            path: ["AXWindow", "AXGroup[0]", "AXScrollArea[0]", "AXList[0]", "AXGroup[1]", "AXButton[0]"]
+        )
+        let nearbyCheckbox = TargetDescriptor(
+            id: "nearby-checkbox", appName: "Slack", role: "AXCheckBox",
+            title: "toggle",
+            frame: TargetRect(x: 70, y: 200, width: 20, height: 20),
+            path: ["AXWindow", "AXGroup[0]", "AXScrollArea[0]", "AXList[0]", "AXGroup[1]", "AXCheckBox[0]"]
+        )
+        let jimText = TargetDescriptor(
+            id: "jim-text", appName: "Slack", role: "AXStaticText",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 200, width: 50, height: 20),
+            path: ["AXWindow", "AXGroup[0]", "AXScrollArea[0]", "AXList[0]", "AXGroup[1]", "AXStaticText[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack", bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "Slack", targets: [nearbyCheckbox, jimText, jimButton]
+        )
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "jim", limit: 10)
+
+        let directMatchIDs = Set(["jim-button", "jim-text"])
+        // Both direct matches must come before the adjacent-only checkbox
+        for (index, target) in ranked.enumerated() {
+            if target.id == "nearby-checkbox" {
+                let directsBefore = ranked[0..<index].filter { directMatchIDs.contains($0.id) }.count
+                XCTAssertEqual(directsBefore, 2, "Both direct matches should rank before adjacent checkbox")
+                break
+            }
+        }
+        XCTAssertTrue(directMatchIDs.contains(ranked.first!.id), "First result should be a direct match")
+    }
+
+    func testContainerSiblingsRankAfterDirectMatches() {
+        let directMatch = TargetDescriptor(
+            id: "match", appName: "App", role: "AXStaticText",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 100, width: 100, height: 20),
+            path: ["AXWindow", "AXGroup[0]", "AXList[0]", "AXGroup[1]", "AXStaticText[0]"]
+        )
+        let sibling = TargetDescriptor(
+            id: "sibling", appName: "App", role: "AXStaticText",
+            title: "Message",
+            frame: TargetRect(x: 210, y: 100, width: 60, height: 20),
+            path: ["AXWindow", "AXGroup[0]", "AXList[0]", "AXGroup[1]", "AXStaticText[1]"]
+        )
+        let unrelated = TargetDescriptor(
+            id: "unrelated", appName: "App", role: "AXButton",
+            title: "Settings",
+            frame: TargetRect(x: 500, y: 500, width: 80, height: 30),
+            path: ["AXWindow", "AXGroup[0]", "AXToolbar[0]", "AXButton[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "App", bundleIdentifier: nil,
+            windowTitle: "App", targets: [unrelated, sibling, directMatch]
+        )
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "jim", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, "match", "Direct match should be first")
+        // Sibling should appear in results (container boost); unrelated should not
+        XCTAssertTrue(ranked.map(\.id).contains("sibling"), "Container sibling should appear")
+        XCTAssertFalse(ranked.map(\.id).contains("unrelated"), "Unrelated element should not appear")
+    }
+
+    func testMultipleDirectMatchesSortedByExactness() {
+        let exact = TargetDescriptor(
+            id: "exact", appName: "App", role: "AXButton",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 100, width: 60, height: 30),
+            path: ["AXWindow", "AXGroup[0]", "AXButton[0]"]
+        )
+        let fuzzy = TargetDescriptor(
+            id: "fuzzy", appName: "App", role: "AXButton",
+            title: "jim's workspace",
+            frame: TargetRect(x: 100, y: 200, width: 120, height: 30),
+            path: ["AXWindow", "AXGroup[1]", "AXButton[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "App", bundleIdentifier: nil,
+            windowTitle: "App", targets: [fuzzy, exact]
+        )
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "jim", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, "exact", "Exact match should rank above fuzzy match")
+        XCTAssertEqual(ranked[1].id, "fuzzy")
+    }
+
+    func testCollapsedElementsStillScoredByRanker() {
+        // The ranker scores all elements; filtering happens in AccessibilitySnapshotter.filteringSnapshot().
+        // This test verifies the ranker doesn't silently drop them.
+        let collapsed = TargetDescriptor(
+            id: "collapsed", appName: "App", role: "AXButton",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 100, width: 1, height: 0),
+            path: ["AXWindow", "AXButton[0]"]
+        )
+        let visible = TargetDescriptor(
+            id: "visible", appName: "App", role: "AXButton",
+            title: "jim",
+            frame: TargetRect(x: 100, y: 100, width: 60, height: 30),
+            path: ["AXWindow", "AXButton[1]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "App", bundleIdentifier: nil,
+            windowTitle: "App", targets: [collapsed, visible]
+        )
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "jim", limit: 10)
+
+        XCTAssertTrue(ranked.contains(where: { $0.id == "collapsed" }), "Ranker should return collapsed elements")
+        XCTAssertTrue(ranked.contains(where: { $0.id == "visible" }), "Ranker should return visible elements")
+    }
+
+    func testAdjacentPromotionStillWorksButBelowDirectMatch() {
+        // When searching for a task title, the text label (direct match) should rank first,
+        // and the adjacent checkbox should still appear (ranked second).
+        let textLabel = TargetDescriptor(
+            id: "label", appName: "App", role: "AXStaticText",
+            title: "Review PR", value: "Review PR",
+            frame: TargetRect(x: 60, y: 100, width: 200, height: 20),
+            path: ["AXWindow", "AXScrollArea[0]", "AXList[0]", "AXRow[0]", "AXCell[1]", "AXStaticText[0]"]
+        )
+        let checkbox = TargetDescriptor(
+            id: "checkbox", appName: "App", role: "AXCheckBox",
+            title: "toggle",
+            frame: TargetRect(x: 20, y: 100, width: 30, height: 30),
+            path: ["AXWindow", "AXScrollArea[0]", "AXList[0]", "AXRow[0]", "AXCell[0]", "AXCheckBox[0]"]
+        )
+        let farButton = TargetDescriptor(
+            id: "far-button", appName: "App", role: "AXButton",
+            title: "Close",
+            frame: TargetRect(x: 600, y: 10, width: 30, height: 30),
+            path: ["AXWindow", "AXToolbar[0]", "AXButton[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "App", bundleIdentifier: nil,
+            windowTitle: "App", targets: [farButton, checkbox, textLabel]
+        )
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "Review PR", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, "label", "Direct match should rank first")
+        XCTAssertTrue(ranked.map(\.id).contains("checkbox"), "Adjacent checkbox should still be promoted")
+        XCTAssertFalse(ranked.map(\.id).contains("far-button"), "Unrelated button should not appear")
+    }
+
+    func testExactNamedMatchesRankBeforeSlackStyleAdjacentArtifacts() {
+        let avatar = TargetDescriptor(
+            id: "avatar",
+            appName: "Slack",
+            role: "AXImage",
+            title: "AXImage",
+            frame: TargetRect(x: 164, y: 1267, width: 13, height: 13),
+            path: ["AXWindow", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXWebArea[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[5]", "AXGroup[1]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[1]", "AXGroup[0]", "AXOutline[13]", "AXRow[0]", "AXGroup[0]", "AXGroup[1]"]
+        )
+        let decorativeLink = TargetDescriptor(
+            id: "decorative-link",
+            appName: "Slack",
+            role: "AXLink",
+            title: "AXLink",
+            frame: TargetRect(x: 343, y: 932, width: 24, height: 16),
+            path: ["AXWindow", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXWebArea[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[5]", "AXGroup[1]", "AXGroup[0]", "AXGroup[0]", "AXGroup[2]", "AXGroup[5]", "AXGroup[0]", "AXGroup[0]", "AXGroup[1]", "AXGroup[0]", "AXList[4]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]"]
+        )
+        let personButton = TargetDescriptor(
+            id: "person-button",
+            appName: "Slack",
+            role: "AXButton",
+            title: "Yi-Hung Chou",
+            frame: TargetRect(x: 375, y: 875, width: 96, height: 23),
+            path: ["AXWindow", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXWebArea[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[5]", "AXGroup[1]", "AXGroup[0]", "AXGroup[0]", "AXGroup[2]", "AXGroup[5]", "AXGroup[0]", "AXGroup[0]", "AXGroup[1]", "AXGroup[0]", "AXList[3]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]"]
+        )
+        let personText = TargetDescriptor(
+            id: "person-text",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "Yi-Hung Chou",
+            frame: TargetRect(x: 179, y: 1260, width: 80, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXWebArea[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[5]", "AXGroup[1]", "AXGroup[0]", "AXGroup[0]", "AXGroup[0]", "AXGroup[1]", "AXGroup[0]", "AXOutline[13]", "AXRow[0]", "AXGroup[1]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "general",
+            targets: [avatar, decorativeLink, personText, personButton]
+        )
+
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "Yi-Hung Chou", limit: 10)
+
+        XCTAssertEqual(ranked.prefix(2).map(\.id), ["person-button", "person-text"])
+        XCTAssertTrue(ranked.dropFirst(2).map(\.id).contains("avatar"))
+    }
+
+    func testSearchScoringPrefersExactPhraseOverSlackNearMatches() {
+        let exactButton = TargetDescriptor(
+            id: "exact-button",
+            appName: "Slack",
+            role: "AXButton",
+            title: "Add People to Channel",
+            frame: TargetRect(x: 300, y: 200, width: 180, height: 30),
+            path: ["AXWindow", "AXGroup[0]", "AXPopover[0]", "AXButton[0]"]
+        )
+        let nearbyPopup = TargetDescriptor(
+            id: "nearby-popup",
+            appName: "Slack",
+            role: "AXPopUpButton",
+            title: "Add channels",
+            frame: TargetRect(x: 300, y: 245, width: 180, height: 30),
+            path: ["AXWindow", "AXGroup[0]", "AXPopover[0]", "AXPopUpButton[0]"]
+        )
+        let nearbyRow = TargetDescriptor(
+            id: "nearby-row",
+            appName: "Slack",
+            role: "AXRow",
+            title: "AXRow",
+            value: "Add channels",
+            frame: TargetRect(x: 300, y: 280, width: 180, height: 24),
+            path: ["AXWindow", "AXGroup[0]", "AXPopover[0]", "AXRow[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "general",
+            targets: [nearbyPopup, nearbyRow, exactButton]
+        )
+
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "Add People to Channel", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, "exact-button")
+        XCTAssertEqual(Set(ranked.prefix(3).map(\.id)), Set(["exact-button", "nearby-popup", "nearby-row"]))
+    }
+
+    func testMentionSearchPrefersExactMentionBeforePlainName() {
+        let exactMention = TargetDescriptor(
+            id: "exact-mention",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "@jim",
+            frame: TargetRect(x: 180, y: 1232, width: 28, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXWebArea[0]", "AXOutline[12]", "AXRow[0]", "AXGroup[1]"]
+        )
+        let plainName = TargetDescriptor(
+            id: "plain-name",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "jim",
+            frame: TargetRect(x: 220, y: 1232, width: 20, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXWebArea[0]", "AXOutline[13]", "AXRow[0]", "AXGroup[1]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "general",
+            targets: [plainName, exactMention]
+        )
+
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "@jim", limit: 10)
+
+        XCTAssertEqual(ranked.prefix(2).map(\.id), ["exact-mention", "plain-name"])
+    }
+
+    func testMentionSearchFallsBackToPlainNameWhenSigilMissing() {
+        let plainName = TargetDescriptor(
+            id: "plain-name",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "jim",
+            frame: TargetRect(x: 180, y: 1232, width: 20, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXWebArea[0]", "AXOutline[12]", "AXRow[0]", "AXGroup[1]"]
+        )
+        let unrelated = TargetDescriptor(
+            id: "unrelated",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "jill",
+            frame: TargetRect(x: 240, y: 1232, width: 18, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXWebArea[0]", "AXOutline[13]", "AXRow[0]", "AXGroup[1]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "general",
+            targets: [unrelated, plainName]
+        )
+
+        let ranked = SemanticTargetRanker.rankedTargets(in: snapshot, query: "@jim", limit: 10)
+
+        XCTAssertEqual(ranked.first?.id, "plain-name")
+        XCTAssertFalse(ranked.map(\.id).contains("unrelated"))
+    }
+
+    func testStableTargetResolverRebindsLegacyIDAfterPathAndFrameShift() {
+        let legacyID = Data(
+            "Slack|AXStaticText|AXStaticText|@jim|AXWindow/AXGroup[0]/AXWebArea[0]/AXGroup[1]/AXStaticText[0]|100:200:40:18".utf8
+        ).base64EncodedString()
+        let refreshedTarget = TargetDescriptor(
+            id: "current-target",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "@jim",
+            frame: TargetRect(x: 108, y: 214, width: 41, height: 18),
+            path: ["AXWindow", "AXGroup[2]", "AXWebArea[0]", "AXGroup[4]", "AXStaticText[0]"]
+        )
+        let distractor = TargetDescriptor(
+            id: "distractor",
+            appName: "Slack",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            value: "@jill",
+            frame: TargetRect(x: 240, y: 300, width: 40, height: 18),
+            path: ["AXWindow", "AXGroup[0]", "AXWebArea[0]", "AXGroup[1]", "AXStaticText[0]"]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "general",
+            targets: [distractor, refreshedTarget]
+        )
+
+        let resolved = StableTargetResolver.resolve(targetID: legacyID, in: snapshot)
+
+        XCTAssertEqual(resolved?.id, "current-target")
     }
 
     func testScrollControllerTracksSessionLifecycle() {

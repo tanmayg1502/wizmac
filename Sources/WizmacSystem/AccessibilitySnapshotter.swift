@@ -307,7 +307,11 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
             cacheHit = true
         }
 
-        guard var cachedSession, let target = cachedSession.targetIndex[id] else { return nil }
+        guard var cachedSession,
+              let target = resolvedTarget(in: &cachedSession, requestedID: id)
+        else {
+            return nil
+        }
         if cacheHit {
             cachedSession.cacheHits += 1
         } else {
@@ -411,8 +415,8 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         }
 
         guard var cachedSession,
-              let target = cachedSession.targetIndex[targetID],
-              let element = cachedSession.elementIndex[targetID]
+              let target = resolvedTarget(in: &cachedSession, requestedID: targetID),
+              let element = resolvedElement(in: &cachedSession, requestedID: targetID)
         else {
             return nil
         }
@@ -717,6 +721,42 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
             return cached.snapshot.windowTitle == currentWindowTitle
         }
         return true
+    }
+
+    private func resolvedTarget(in session: inout CachedUISession, requestedID: String) -> TargetDescriptor? {
+        if let target = session.targetIndex[requestedID] {
+            return target
+        }
+
+        guard let reboundTarget = StableTargetResolver.resolve(targetID: requestedID, in: session.snapshot) else {
+            return nil
+        }
+
+        return alias(target: reboundTarget, requestedID: requestedID, in: &session)
+    }
+
+    private func resolvedElement(in session: inout CachedUISession, requestedID: String) -> AXUIElement? {
+        if let element = session.elementIndex[requestedID] {
+            return element
+        }
+
+        guard let reboundTarget = StableTargetResolver.resolve(targetID: requestedID, in: session.snapshot),
+              let aliasedTarget = alias(target: reboundTarget, requestedID: requestedID, in: &session)
+        else {
+            return nil
+        }
+
+        return session.elementIndex[aliasedTarget.id]
+    }
+
+    private func alias(target: TargetDescriptor, requestedID: String, in session: inout CachedUISession) -> TargetDescriptor? {
+        guard let element = session.elementIndex[target.id] else { return nil }
+
+        var aliasedTarget = target
+        aliasedTarget.id = requestedID
+        session.targetIndex[requestedID] = aliasedTarget
+        session.elementIndex[requestedID] = element
+        return aliasedTarget
     }
 
     private func storeSession(_ session: CachedUISession) {
@@ -1064,7 +1104,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
     }
 
     private func isFrameActionable(_ frame: CGRect?) -> Bool {
-        guard let frame, frame.width > 0, frame.height > 0 else { return false }
+        guard let frame, frame.width > 1, frame.height > 1 else { return false }
         return NSScreen.screens.isEmpty || NSScreen.screens.contains(where: { $0.frame.intersects(frame) })
     }
 

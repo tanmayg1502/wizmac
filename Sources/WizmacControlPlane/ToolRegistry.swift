@@ -41,13 +41,15 @@ public struct ControlPlaneToolRegistry: Sendable {
         .schemaBacked(
             name: "ui.search",
             title: "Search UI",
-            description: "Search the accessibility tree and return matching targets. Pass pid or app (name/bundle ID) to target a specific app instead of the frontmost one.",
+            description: "Search the accessibility tree and return matching targets, or resolve a previously captured targetID exactly. Pass pid or app (name/bundle ID) to target a specific app instead of the frontmost one.",
             schemaProperties: [
                 "query": .string("string"),
+                "targetID": .string("string"),
                 "limit": .string("number"),
                 "pid": .string("number"),
                 "app": .string("string"),
                 "sessionID": .string("string"),
+                "snapshotID": .string("string"),
                 "scope": .string("string"),
                 "includeMenus": .string("boolean"),
                 "launchIfNeeded": .string("boolean"),
