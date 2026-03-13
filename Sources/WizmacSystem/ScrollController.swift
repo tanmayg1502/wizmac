@@ -12,13 +12,23 @@ public final class ScrollController: ScrollControlling {
     }
 
     public func scrollTargets(from snapshot: TargetSnapshot) -> [TargetDescriptor] {
-        snapshot.targets.filter { target in
-            let loweredRole = target.role.lowercased()
-            return loweredRole.contains("scroll")
-                || loweredRole.contains("table")
-                || loweredRole.contains("list")
-                || loweredRole.contains("outline")
-        }
+        snapshot.targets
+            .compactMap { target -> (TargetDescriptor, Int, Double)? in
+                guard let frame = target.frame else { return nil }
+                let score = scrollAffinityScore(for: target, frame: frame)
+                guard score > 0 else { return nil }
+                return (target, score, frame.width * frame.height)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 {
+                    return lhs.1 > rhs.1
+                }
+                if lhs.2 != rhs.2 {
+                    return lhs.2 > rhs.2
+                }
+                return lhs.0.id.localizedCaseInsensitiveCompare(rhs.0.id) == .orderedAscending
+            }
+            .map(\.0)
     }
 
     public func focus(targetID: String) {
@@ -68,5 +78,64 @@ public final class ScrollController: ScrollControlling {
             }
         }
         return success
+    }
+
+    private func scrollAffinityScore(for target: TargetDescriptor, frame: TargetRect) -> Int {
+        let loweredRole = target.role.lowercased()
+        let loweredPath = target.path.joined(separator: " ").lowercased()
+        var score = 0
+
+        if loweredRole.contains("scroll") {
+            score = max(score, 380)
+        }
+        if loweredRole.contains("table") {
+            score = max(score, 340)
+        }
+        if loweredRole.contains("list") {
+            score = max(score, 340)
+        }
+        if loweredRole.contains("outline") {
+            score = max(score, 260)
+        }
+
+        if loweredPath.contains("axscrollarea") {
+            score = max(score, 260)
+        }
+        if loweredPath.contains("axtable") {
+            score = max(score, 240)
+        }
+        if loweredPath.contains("axlist") {
+            score = max(score, frame.width >= 600 ? 360 : 230)
+        }
+        if loweredPath.contains("axoutline") {
+            score = max(score, 220)
+            if frame.width < 240 {
+                score -= 48
+            }
+        }
+
+        guard score > 0 else { return 0 }
+
+        if frame.width >= 600 {
+            score += 90
+        } else if frame.width >= 300 {
+            score += 40
+        } else if frame.width >= 180 {
+            score += 8
+        } else if frame.width < 220 {
+            score -= 36
+        }
+
+        if frame.height >= 180 {
+            score += 20
+        }
+
+        if frame.x >= 250 {
+            score += 24
+        } else if frame.x < 220 {
+            score -= 18
+        }
+
+        return score
     }
 }

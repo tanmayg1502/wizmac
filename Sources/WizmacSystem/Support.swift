@@ -235,7 +235,8 @@ protocol AccessibilitySnapshotting {
         limit: Int,
         sessionID: String?,
         scope: UISearchScope,
-        includeMenus: Bool
+        includeMenus: Bool,
+        bypassCache: Bool
     ) -> UISearchResult?
     func target(
         id: String,
@@ -248,6 +249,7 @@ protocol AccessibilitySnapshotting {
     ) -> UITargetLookupResult?
     func endSession(id: String?) -> UISessionMetrics?
     func currentSession() -> UISessionMetrics?
+    func sessionSnapshot(id: String?) -> TargetSnapshot?
     func hintSession(query: String?, labelAlphabet: String, limit: Int) -> UIHintSession?
     func hintSession(query: String?, pid: pid_t, labelAlphabet: String, limit: Int) -> UIHintSession?
     func listApplications() -> [RunningAppInfo]
@@ -280,7 +282,8 @@ extension AccessibilitySnapshotting {
         limit: Int,
         sessionID _: String?,
         scope _: UISearchScope,
-        includeMenus _: Bool
+        includeMenus _: Bool,
+        bypassCache _: Bool
     ) -> UISearchResult? {
         let startedAt = Date()
         let snapshot = pid.map {
@@ -302,6 +305,26 @@ extension AccessibilitySnapshotting {
                 cacheLookupMs: 0,
                 rankingMs: 0
             )
+        )
+    }
+    func search(
+        query: String,
+        pid: pid_t?,
+        labelAlphabet: String,
+        limit: Int,
+        sessionID: String?,
+        scope: UISearchScope,
+        includeMenus: Bool
+    ) -> UISearchResult? {
+        search(
+            query: query,
+            pid: pid,
+            labelAlphabet: labelAlphabet,
+            limit: limit,
+            sessionID: sessionID,
+            scope: scope,
+            includeMenus: includeMenus,
+            bypassCache: false
         )
     }
     func target(
@@ -337,6 +360,7 @@ extension AccessibilitySnapshotting {
     }
     func endSession(id _: String?) -> UISessionMetrics? { nil }
     func currentSession() -> UISessionMetrics? { nil }
+    func sessionSnapshot(id _: String?) -> TargetSnapshot? { nil }
     func hintSession(query: String?, pid: pid_t, labelAlphabet: String, limit: Int) -> UIHintSession? {
         hintSession(query: query, labelAlphabet: labelAlphabet, limit: limit)
     }
@@ -358,6 +382,7 @@ extension AccessibilitySnapshotting {
 protocol WindowControlling {
     func visibleWindows(excluding rules: [ExcludedWindowRule]) -> [VisibleWindow]
     func focus(windowID: Int?, title: String?, pid: Int32?) -> Bool
+    func matchingWindow(windowID: Int?, title: String?, query: String?, pid: Int32?, excluding rules: [ExcludedWindowRule]) -> VisibleWindow?
     func excludeRule(windowID: Int?, title: String?, pid: Int32?, excluding rules: [ExcludedWindowRule]) -> ExcludedWindowRule?
 }
 
@@ -1013,6 +1038,20 @@ enum FuzzyMatcher {
             .max() ?? 0
     }
 
+    static func strictTextScore(query: String, in target: TargetDescriptor) -> Int {
+        let queryComponents = SearchTextComponents(query)
+        guard queryComponents.raw.isEmpty == false else { return 0 }
+
+        let fields = searchableFields(for: target)
+        let fieldBiases = [20, 18, 14]
+
+        return zip(fields, fieldBiases)
+            .map { field, fieldBias in
+                strictFieldMatchScore(field: field, query: queryComponents, fieldBias: fieldBias)
+            }
+            .max() ?? 0
+    }
+
     static func structuralScore(query: String, in target: TargetDescriptor) -> Int {
         let queryComponents = SearchTextComponents(query)
         guard queryComponents.raw.isEmpty == false else { return 0 }
@@ -1107,6 +1146,46 @@ enum FuzzyMatcher {
         )
         if mentionAgnosticTokenScore > 0 {
             score = max(score, max(mentionAgnosticTokenScore - 8, 0))
+        }
+
+        return score > 0 ? score + fieldBias : 0
+    }
+
+    private static func strictFieldMatchScore(field: String, query: SearchTextComponents, fieldBias: Int) -> Int {
+        let fieldComponents = SearchTextComponents(field)
+        guard fieldComponents.raw.isEmpty == false else { return 0 }
+
+        var score = 0
+
+        if fieldComponents.raw == query.raw {
+            score = max(score, 180)
+        } else if fieldComponents.normalized == query.normalized, query.normalized.isEmpty == false {
+            score = max(score, 175)
+        }
+
+        if query.raw.count >= 2 {
+            if fieldComponents.raw.hasPrefix(query.raw) {
+                score = max(score, 145)
+            } else if query.normalized.isEmpty == false, fieldComponents.normalized.hasPrefix(query.normalized) {
+                score = max(score, 140)
+            }
+
+            if fieldComponents.raw.contains(query.raw) {
+                score = max(score, 130)
+            } else if query.normalized.isEmpty == false, fieldComponents.normalized.contains(query.normalized) {
+                score = max(score, 125)
+            }
+        }
+
+        if query.mentionAgnosticNormalized.isEmpty == false,
+           fieldComponents.mentionAgnosticNormalized.isEmpty == false {
+            if fieldComponents.mentionAgnosticNormalized == query.mentionAgnosticNormalized {
+                score = max(score, 116)
+            } else if fieldComponents.mentionAgnosticNormalized.hasPrefix(query.mentionAgnosticNormalized) {
+                score = max(score, 104)
+            } else if fieldComponents.mentionAgnosticNormalized.contains(query.mentionAgnosticNormalized) {
+                score = max(score, 96)
+            }
         }
 
         return score > 0 ? score + fieldBias : 0

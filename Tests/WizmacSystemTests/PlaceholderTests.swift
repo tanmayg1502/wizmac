@@ -520,6 +520,51 @@ Timestamp     A/R    Flags  if Domain               Service Type         Instanc
         XCTAssertEqual(ended?.stepCount, 1)
         XCTAssertNil(controller.currentSession())
     }
+
+    func testScrollControllerPrefersWideSlackContentPaneOverSidebarOutline() {
+        let controller = ScrollController(performer: RecordingScrollPerformer())
+        let sidebar = TargetDescriptor(
+            id: "sidebar-outline",
+            appName: "Slack",
+            role: "AXOutline",
+            title: "AXOutline",
+            value: "",
+            frame: TargetRect(x: 131, y: 825, width: 179, height: 610),
+            path: [
+                "AXWindow",
+                "AXWindow[0]",
+                "AXGroup[0]",
+                "AXWebArea[0]",
+                "AXOutline[0]",
+            ]
+        )
+        let contentPane = TargetDescriptor(
+            id: "content-row",
+            appName: "Slack",
+            role: "AXGroup",
+            title: "Hang Du: . Image: No alt text. 2:06 PM. 1 attachment.",
+            value: "",
+            frame: TargetRect(x: 311, y: 1217, width: 964, height: 84),
+            path: [
+                "AXWindow",
+                "AXWindow[0]",
+                "AXGroup[0]",
+                "AXWebArea[0]",
+                "AXGroup[0]",
+                "AXList[4]",
+            ]
+        )
+        let snapshot = TargetSnapshot(
+            appName: "Slack",
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: "lab-meeting (Channel) - spideruci - Slack",
+            targets: [sidebar, contentPane]
+        )
+
+        let targets = controller.scrollTargets(from: snapshot)
+
+        XCTAssertEqual(targets.first?.id, contentPane.id)
+    }
 }
 
 private final class RecordingScrollPerformer: ScrollEventPerforming {

@@ -543,6 +543,536 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(bridge.syncedContexts.last?.text, "hellohello world")
     }
 
+    func testUIOpenAndUISelectResolveHumanFriendlySelectors() async throws {
+        let target = sampleTarget(
+            id: "family-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 20, y: 40, width: 120, height: 28)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let openResult = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiOpen,
+                arguments: ["query": .string("Family")],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let selectResult = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiSelect,
+                arguments: ["option": .string("Family")],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(openResult.outcome, .success)
+        XCTAssertEqual(selectResult.outcome, .success)
+        XCTAssertEqual(snapshotter.searchInvocations.map(\.query), ["Family", "Family"])
+        XCTAssertEqual(pointer.clicks.count, 2)
+    }
+
+    func testUIToggleSkipsClickWhenRequestedStateAlreadyMatches() async throws {
+        let target = sampleTarget(
+            id: "notifications-toggle",
+            title: "Notifications",
+            role: "AXCheckBox"
+        )
+        var selectedTarget = target
+        selectedTarget.value = "1"
+        let snapshotter = SnapshotterStub(
+            snapshot: sampleSnapshot(targets: [selectedTarget]),
+            hintSession: nil,
+            targetsByID: [selectedTarget.id: selectedTarget]
+        )
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiToggle,
+                arguments: [
+                    "targetID": .string(selectedTarget.id),
+                    "state": .string("on"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["changed"]?.boolValue, false)
+        XCTAssertEqual(pointer.clicks.count, 0)
+    }
+
+    func testUIReadAndUIWaitExposeResolvedContentWithoutManualTreeParsing() async throws {
+        let target = sampleTarget(
+            id: "status-label",
+            title: "Status",
+            role: "AXStaticText"
+        )
+        var detailTarget = target
+        detailTarget.value = "Ready"
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [detailTarget]), hintSession: nil)
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let readResult = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiRead,
+                arguments: ["query": .string("Status")],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let waitResult = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiWait,
+                arguments: [
+                    "query": .string("Status"),
+                    "text": .string("Ready"),
+                    "timeoutMs": .number(50),
+                    "pollIntervalMs": .number(20),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(readResult.outcome, .success)
+        XCTAssertEqual(readResult.payload?.objectValue?["targetID"]?.stringValue, detailTarget.id)
+        XCTAssertEqual(readResult.payload?.objectValue?["text"]?.stringValue, "Ready")
+        XCTAssertEqual(waitResult.outcome, .success)
+        XCTAssertEqual(waitResult.payload?.objectValue?["matchedCount"]?.intValue, 1)
+    }
+
+    func testUIDiffReportsFreshChangesAgainstCachedBaseline() async throws {
+        let baseline = sampleSnapshot(targets: [sampleTarget(id: "one", title: "One", role: "AXButton")])
+        let fresh = sampleSnapshot(targets: [
+            sampleTarget(id: "one", title: "One", role: "AXButton"),
+            sampleTarget(id: "two", title: "Two", role: "AXButton"),
+        ])
+        let snapshotter = SnapshotterStub(snapshot: baseline, hintSession: nil)
+        snapshotter.sessionSnapshotValue = baseline
+        snapshotter.queuedSearchSnapshots = [fresh]
+        let dependencies = try makeDependencies(snapshotter: snapshotter)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiDiff,
+                arguments: ["sessionID": .string("session-1")],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["changed"]?.boolValue, true)
+        XCTAssertEqual(result.payload?.objectValue?["addedTargets"]?.arrayValue?.count, 1)
+        XCTAssertEqual(snapshotter.endSessionCalls, ["session-1"])
+    }
+
+    func testScrollToFindsTargetAfterSteppingActiveContainer() async throws {
+        let scrollArea = sampleTarget(
+            id: "message-list",
+            title: "Messages",
+            role: "AXScrollArea",
+            rect: TargetRect(x: 10, y: 20, width: 120, height: 180)
+        )
+        let target = sampleTarget(
+            id: "target-row",
+            title: "Weekly Update",
+            role: "AXStaticText",
+            rect: TargetRect(x: 20, y: 160, width: 120, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [scrollArea]), hintSession: nil)
+        snapshotter.queuedSearchSnapshots = [
+            sampleSnapshot(targets: [scrollArea]),
+            sampleSnapshot(targets: [scrollArea, target]),
+        ]
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string("Weekly Update"),
+                    "timeoutMs": .number(150),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(3),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 1)
+        XCTAssertEqual(performer.calls.count, 1)
+    }
+
+    func testScrollToIgnoresWeakSemanticMatchesUntilExactTextAppears() async throws {
+        let scrollArea = sampleTarget(
+            id: "message-list",
+            title: "Messages",
+            role: "AXScrollArea",
+            rect: TargetRect(x: 10, y: 20, width: 120, height: 180)
+        )
+        let misleadingMessage = sampleTarget(
+            id: "jim-announcement",
+            title: "jim: All, the next two weeks are final-exam week and spring break. So, our next meeting will be in three weeks.",
+            role: "AXStaticText",
+            rect: TargetRect(x: 20, y: 40, width: 220, height: 24)
+        )
+        let targetMessage = sampleTarget(
+            id: "target-row",
+            title: "Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?",
+            role: "AXStaticText",
+            rect: TargetRect(x: 20, y: 140, width: 260, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [scrollArea, misleadingMessage]), hintSession: nil)
+        snapshotter.queuedSearchSnapshots = [
+            sampleSnapshot(targets: [scrollArea, misleadingMessage]),
+            sampleSnapshot(targets: [scrollArea, misleadingMessage, targetMessage]),
+        ]
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string("Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?"),
+                    "timeoutMs": .number(150),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(3),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, targetMessage.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 1)
+        XCTAssertEqual(performer.calls.count, 1)
+    }
+
+    func testScrollToPrefersLargestContentListOverSidebarOutline() async throws {
+        let sidebar = TargetDescriptor(
+            id: "sidebar-outline",
+            appName: "FixtureHost",
+            role: "AXOutline",
+            title: "Sidebar",
+            value: "",
+            frame: TargetRect(x: 0, y: 0, width: 180, height: 620),
+            hint: "aa",
+            path: ["AXWindow", "AXOutline[0]"]
+        )
+        let contentPane = TargetDescriptor(
+            id: "content-pane",
+            appName: "FixtureHost",
+            role: "AXGroup",
+            title: "Content Pane",
+            value: "",
+            frame: TargetRect(x: 300, y: 120, width: 900, height: 420),
+            hint: "ab",
+            path: ["AXWindow", "AXGroup[0]", "AXList[4]", "AXGroup[0]"]
+        )
+        let target = sampleTarget(
+            id: "target-row",
+            title: "Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?",
+            role: "AXStaticText",
+            rect: TargetRect(x: 340, y: 220, width: 260, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [sidebar, contentPane]), hintSession: nil)
+        snapshotter.queuedSearchSnapshots = [
+            sampleSnapshot(targets: [sidebar, contentPane]),
+            sampleSnapshot(targets: [sidebar, contentPane, target]),
+        ]
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string("Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?"),
+                    "timeoutMs": .number(150),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(3),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 1)
+        XCTAssertEqual(performer.calls.count, 1)
+        XCTAssertEqual(performer.calls.first?.point, CGPoint(x: 750, y: 330))
+    }
+
+    func testScrollToUsesFreshFullSnapshots() async throws {
+        let scrollArea = sampleTarget(
+            id: "message-list",
+            title: "Messages",
+            role: "AXScrollArea",
+            rect: TargetRect(x: 10, y: 20, width: 320, height: 180)
+        )
+        let target = sampleTarget(
+            id: "target-row",
+            title: "Weekly Update",
+            role: "AXStaticText",
+            rect: TargetRect(x: 24, y: 72, width: 180, height: 24)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [scrollArea, target]), hintSession: nil)
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string("Weekly Update"),
+                    "timeoutMs": .number(150),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(2),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, target.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 0)
+        XCTAssertEqual(performer.calls.count, 0)
+        XCTAssertEqual(snapshotter.searchInvocations.first?.limit, 250)
+        XCTAssertEqual(snapshotter.searchInvocations.first?.bypassCache, true)
+    }
+
+    func testScrollToStabilizesClippedEdgeMatches() async throws {
+        let query = "Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?"
+        let scrollArea = sampleTarget(
+            id: "message-list",
+            title: "Messages",
+            role: "AXScrollArea",
+            rect: TargetRect(x: 10, y: 20, width: 320, height: 180)
+        )
+        let clippedText = TargetDescriptor(
+            id: "target-fragment",
+            appName: "FixtureHost",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            subtitle: nil,
+            value: query,
+            frame: TargetRect(x: 24, y: 20, width: 220, height: 6),
+            hint: "aa",
+            path: ["AXWindow", "AXScrollArea[0]", "AXGroup[0]", "AXStaticText[0]"]
+        )
+        let stabilizedRow = TargetDescriptor(
+            id: "target-row",
+            appName: "FixtureHost",
+            role: "AXGroup",
+            title: "Tanmay: \(query) 3:28 PM.",
+            subtitle: nil,
+            value: "",
+            frame: TargetRect(x: 18, y: 36, width: 280, height: 52),
+            hint: "ab",
+            path: ["AXWindow", "AXScrollArea[0]", "AXGroup[0]"]
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [scrollArea, clippedText]), hintSession: nil)
+        snapshotter.queuedSearchSnapshots = [
+            sampleSnapshot(targets: [scrollArea, clippedText]),
+            sampleSnapshot(targets: [scrollArea, stabilizedRow]),
+        ]
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string(query),
+                    "direction": .string("up"),
+                    "timeoutMs": .number(200),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(3),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, stabilizedRow.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 1)
+        XCTAssertEqual(performer.calls.map(\.direction), ["down"])
+        XCTAssertEqual(performer.calls.map(\.amount), [1])
+    }
+
+    func testScrollToDoesNotReturnGenericAncestorForStableTextMatch() async throws {
+        let query = "Hi guys! I'm so sorry i wasn't able to show up to meeting today. Can i demo the project next week?"
+        let scrollArea = sampleTarget(
+            id: "message-list",
+            title: "Messages",
+            role: "AXScrollArea",
+            rect: TargetRect(x: 10, y: 20, width: 320, height: 180)
+        )
+        let genericAncestor = TargetDescriptor(
+            id: "generic-row",
+            appName: "FixtureHost",
+            role: "AXGroup",
+            title: "AXGroup",
+            subtitle: nil,
+            value: "",
+            frame: TargetRect(x: 16, y: 50, width: 280, height: 40),
+            hint: "aa",
+            path: ["AXWindow", "AXScrollArea[0]", "AXGroup[0]"]
+        )
+        let exactText = TargetDescriptor(
+            id: "target-text",
+            appName: "FixtureHost",
+            role: "AXStaticText",
+            title: "AXStaticText",
+            subtitle: nil,
+            value: query,
+            frame: TargetRect(x: 24, y: 58, width: 220, height: 18),
+            hint: "ab",
+            path: ["AXWindow", "AXScrollArea[0]", "AXGroup[0]", "AXStaticText[0]"]
+        )
+        let snapshotter = SnapshotterStub(
+            snapshot: sampleSnapshot(targets: [scrollArea, genericAncestor, exactText]),
+            hintSession: nil
+        )
+        let performer = RecordingScrollPerformer()
+        let scrollController = ScrollController(performer: performer)
+        let dependencies = try makeDependencies(snapshotter: snapshotter, scrollController: scrollController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .scrollTo,
+                arguments: [
+                    "query": .string(query),
+                    "direction": .string("up"),
+                    "timeoutMs": .number(150),
+                    "pollIntervalMs": .number(20),
+                    "maxSteps": .number(2),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["targetID"]?.stringValue, exactText.id)
+        XCTAssertEqual(result.payload?.objectValue?["stepCount"]?.intValue, 0)
+        XCTAssertEqual(performer.calls.count, 0)
+    }
+
+    func testWindowAssertUsesResolvedWindowMatch() async throws {
+        let windowController = WindowControllerStub()
+        windowController.matchedWindow = VisibleWindow(
+            id: 77,
+            appName: "Slack",
+            title: "lab-meeting (Channel) - Slack",
+            pid: 123,
+            frame: nil
+        )
+        let dependencies = try makeDependencies(windowController: windowController)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .windowAssert,
+                arguments: ["query": .string("lab meeting")],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["title"]?.stringValue, "lab-meeting (Channel) - Slack")
+    }
+
+    func testTextReadReturnsFocusedContext() async throws {
+        let bridge = FocusedTextBridgeStub(
+            capture: FocusedTextCapture(
+                element: nil,
+                context: sampleTextContext()
+            )
+        )
+        let dependencies = try makeDependencies(focusedTextBridge: bridge)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(action: .textRead, origin: RequestOrigin(kind: .test))
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["text"]?.stringValue, "hello world")
+        XCTAssertEqual(result.payload?.objectValue?["elementIdentifier"]?.stringValue, "editor-1")
+    }
+
+    func testUIChooseFileChainsInsertAndConfirmClick() async throws {
+        let confirmTarget = sampleTarget(
+            id: "confirm-open",
+            title: "Open",
+            role: "AXButton",
+            rect: TargetRect(x: 80, y: 140, width: 90, height: 30)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [confirmTarget]), hintSession: nil)
+        let bridge = FocusedTextBridgeStub(
+            capture: FocusedTextCapture(
+                element: nil,
+                context: sampleTextContext()
+            )
+        )
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(
+            snapshotter: snapshotter,
+            focusedTextBridge: bridge,
+            pointerPerformer: pointer
+        )
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiChooseFile,
+                arguments: [
+                    "path": .string("/tmp/report.pdf"),
+                    "confirmQuery": .string("Open"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertTrue(bridge.syncedContexts.last?.text.contains("/tmp/report.pdf") ?? false)
+        XCTAssertEqual(pointer.clicks.count, 1)
+        XCTAssertEqual(snapshotter.searchInvocations.last?.query, "Open")
+    }
+
+    func testMenuSelectRunsAppleScriptAgainstRequestedAppAndPath() async throws {
+        let shellRunner = ShellRunnerStub()
+        let dependencies = try makeDependencies(shellRunner: shellRunner)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .menuSelect,
+                arguments: [
+                    "app": .string("Preview"),
+                    "path": .string("File > Export > PDF"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        let invocations = await shellRunner.recordedInvocations()
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(invocations.first?.launchPath, "/usr/bin/osascript")
+        XCTAssertEqual(result.payload?.objectValue?["app"]?.stringValue, "Preview")
+        XCTAssertTrue(invocations.first?.arguments.last?.contains("\"File\", \"Export\", \"PDF\"") ?? false)
+    }
+
     func testUIExecuteInterpolatesBindingsAndCarriesAmbientSessionIdentifiers() async throws {
         let target = sampleTarget(
             id: "family-row",
@@ -588,6 +1118,49 @@ final class ExecutorContractTests: XCTestCase {
             target.id
         )
     }
+
+    func testUIExecuteAcceptsBareHighLevelStepNames() async throws {
+        let target = sampleTarget(
+            id: "family-row",
+            title: "Family",
+            role: "AXButton",
+            rect: TargetRect(x: 20, y: 40, width: 120, height: 28)
+        )
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        snapshotter.targetsByID[target.id] = target
+        let pointer = PointerStub()
+        let dependencies = try makeDependencies(snapshotter: snapshotter, pointerPerformer: pointer)
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiExecute,
+                arguments: [
+                    "actions": .array([
+                        .object([
+                            "tool": .string("open"),
+                            "arguments": .object([
+                                "query": .string("Family"),
+                            ]),
+                        ]),
+                        .object([
+                            "tool": .string("assert"),
+                            "arguments": .object([
+                                "query": .string("Family"),
+                            ]),
+                        ]),
+                    ]),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(pointer.clicks.count, 1)
+        XCTAssertEqual(
+            result.payload?.objectValue?["results"]?.arrayValue?.map { $0.objectValue?["tool"]?.stringValue ?? "" },
+            ["open", "assert"]
+        )
+    }
 }
 
 private extension ExecutorContractTests {
@@ -603,7 +1176,8 @@ private extension ExecutorContractTests {
         musicController: MusicControllerStub = MusicControllerStub(),
         airPlayController: AirPlayControllerStub = AirPlayControllerStub(),
         focusedTextBridge: FocusedTextBridgeStub = FocusedTextBridgeStub(capture: nil),
-        pointerPerformer: PointerStub = PointerStub()
+        pointerPerformer: PointerStub = PointerStub(),
+        shellRunner: any ShellRunning = ShellRunnerStub()
     ) throws -> Dependencies {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -620,7 +1194,8 @@ private extension ExecutorContractTests {
             airPlayController: airPlayController,
             textService: TextModeService(engine: FallbackTextModeEngine()),
             focusedTextBridge: focusedTextBridge,
-            pointerPerformer: pointerPerformer
+            pointerPerformer: pointerPerformer,
+            shellRunner: shellRunner
         )
         return Dependencies(executor: executor, settingsStore: settingsStore)
     }
@@ -672,6 +1247,8 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
         var pid: pid_t?
         var scope: UISearchScope
         var includeMenus: Bool
+        var limit: Int
+        var bypassCache: Bool
     }
 
     struct TargetLookupInvocation: Equatable {
@@ -687,6 +1264,8 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
     var hintSessionValue: UIHintSession?
     var targetsByID: [String: TargetDescriptor]
     var debugDumpPayloadValue: JSONValue?
+    var sessionSnapshotValue: TargetSnapshot?
+    var queuedSearchSnapshots: [TargetSnapshot] = []
     var searchInvocations: [SearchInvocation] = []
     var targetLookupInvocations: [TargetLookupInvocation] = []
     var endSessionCalls: [String?] = []
@@ -722,10 +1301,11 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
         query: String,
         pid: pid_t?,
         labelAlphabet _: String,
-        limit _: Int,
+        limit: Int,
         sessionID: String?,
         scope: UISearchScope,
-        includeMenus: Bool
+        includeMenus: Bool,
+        bypassCache: Bool
     ) -> UISearchResult? {
         searchInvocations.append(
             SearchInvocation(
@@ -733,10 +1313,13 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
                 sessionID: sessionID,
                 pid: pid,
                 scope: scope,
-                includeMenus: includeMenus
+                includeMenus: includeMenus,
+                limit: limit,
+                bypassCache: bypassCache
             )
         )
-        guard var snapshot else { return nil }
+        let nextSnapshot = queuedSearchSnapshots.isEmpty ? snapshot : queuedSearchSnapshots.removeFirst()
+        guard var snapshot = nextSnapshot else { return nil }
         snapshot.sessionID = sessionMetrics.sessionID
         snapshot.snapshotID = sessionMetrics.snapshotID
         sessionMetrics.targetCount = snapshot.targets.count
@@ -777,6 +1360,14 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
         return sessionMetrics
     }
 
+    func sessionSnapshot(id: String?) -> TargetSnapshot? {
+        guard id != nil else { return nil }
+        guard var snapshot = sessionSnapshotValue ?? snapshot else { return nil }
+        snapshot.sessionID = sessionMetrics.sessionID
+        snapshot.snapshotID = sessionMetrics.snapshotID
+        return snapshot
+    }
+
     func hintSession(query _: String?, labelAlphabet _: String, limit _: Int) -> UIHintSession? {
         hintSessionValue
     }
@@ -798,6 +1389,7 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
 private final class WindowControllerStub: WindowControlling {
     let excludeRuleValue: ExcludedWindowRule?
     var focusCalls: [(windowID: Int?, title: String?, pid: Int32?)] = []
+    var matchedWindow: VisibleWindow?
 
     init(excludeRule: ExcludedWindowRule? = nil) {
         self.excludeRuleValue = excludeRule
@@ -814,6 +1406,10 @@ private final class WindowControllerStub: WindowControlling {
 
     func excludeRule(windowID _: Int?, title _: String?, pid _: Int32?, excluding _: [ExcludedWindowRule]) -> ExcludedWindowRule? {
         excludeRuleValue
+    }
+
+    func matchingWindow(windowID _: Int?, title _: String?, query _: String?, pid _: Int32?, excluding _: [ExcludedWindowRule]) -> VisibleWindow? {
+        matchedWindow
     }
 }
 
@@ -858,6 +1454,10 @@ private final class FocusedTextBridgeStub: FocusedTextBridging, @unchecked Senda
 
     func sync(context: TextContextSnapshot, onto _: AXUIElement?) {
         syncedContexts.append(context)
+        if var capture {
+            capture.context = context
+            self.capture = capture
+        }
     }
 
     func apply(
@@ -888,6 +1488,26 @@ private final class PointerStub: PointerAutomationPerforming {
     func drag(from start: CGPoint, to end: CGPoint, steps: Int) -> Bool {
         drags.append((start, end, steps))
         return true
+    }
+}
+
+private actor ShellRunnerStub: ShellRunning {
+    struct Invocation: Equatable {
+        var launchPath: String
+        var arguments: [String]
+        var timeout: TimeInterval
+    }
+
+    var result = CommandResult(stdout: "true\n", stderr: "", terminationStatus: 0)
+    private var invocations: [Invocation] = []
+
+    func run(launchPath: String, arguments: [String], timeout: TimeInterval) async throws -> CommandResult {
+        invocations.append(Invocation(launchPath: launchPath, arguments: arguments, timeout: timeout))
+        return result
+    }
+
+    func recordedInvocations() -> [Invocation] {
+        invocations
     }
 }
 

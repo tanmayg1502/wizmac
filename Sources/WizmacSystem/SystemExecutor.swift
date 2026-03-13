@@ -23,6 +23,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     private let textService: TextModeService
     private let focusedTextBridge: any FocusedTextBridging
     private let pointerPerformer: any PointerAutomationPerforming
+    private let shellRunner: any ShellRunning
     private var activeTextAttachmentID: TextAttachmentID?
     private var activeTextElement: AXUIElement?
 
@@ -37,7 +38,8 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         airPlayController: any AirPlayControlling = AirPlayController(),
         textService: TextModeService = TextModeService(),
         focusedTextBridge: any FocusedTextBridging = FocusedTextBridge(),
-        pointerPerformer: any PointerAutomationPerforming = CGPointerAutomationPerformer()
+        pointerPerformer: any PointerAutomationPerforming = CGPointerAutomationPerformer(),
+        shellRunner: any ShellRunning = ShellCommandRunner()
     ) {
         self.settingsStore = settingsStore
         self.auditStore = auditStore
@@ -50,6 +52,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         self.textService = textService
         self.focusedTextBridge = focusedTextBridge
         self.pointerPerformer = pointerPerformer
+        self.shellRunner = shellRunner
     }
 
     public func execute(_ request: ActionRequest) async -> ActionResult {
@@ -68,6 +71,28 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return await uiActResult(for: request)
         case .uiCopy:
             return await uiCopyResult(for: request)
+        case .uiOpen:
+            return await uiOpenResult(for: request)
+        case .uiSelect:
+            return await uiSelectResult(for: request)
+        case .uiToggle:
+            return await uiToggleResult(for: request)
+        case .uiFocus:
+            return await uiFocusResult(for: request)
+        case .uiRead:
+            return await uiReadResult(for: request)
+        case .uiWait, .uiUntil:
+            return await uiWaitResult(for: request)
+        case .uiAssert:
+            return await uiAssertResult(for: request)
+        case .uiDiff:
+            return await uiDiffResult(for: request)
+        case .uiWatch:
+            return await uiWatchResult(for: request)
+        case .uiSubmit:
+            return await uiSubmitResult(for: request)
+        case .uiChooseFile:
+            return await uiChooseFileResult(for: request)
         case .uiCapture:
             return await uiCaptureResult(for: request)
         case .uiPrefetch:
@@ -77,7 +102,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         case .uiHints:
             return await uiSearchResult(for: request.with(arguments: ["operation": .string("hints")]))
         case .uiDrag:
-            return await uiActResult(for: request.with(arguments: ["interaction": .string("drag")]))
+            return await uiActResult(for: request.with(arguments: dragArguments(for: request)))
         case .uiSessionEnd:
             return await uiSessionEndResult(for: request)
         case .scrollTargets:
@@ -90,10 +115,14 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return await scrollFocusResult(for: request.with(arguments: ["operation": .string("session_start")]))
         case .scrollSessionEnd:
             return await scrollFocusResult(for: request.with(arguments: ["operation": .string("session_end")]))
+        case .scrollTo, .scrollUntil, .scrollIntoView:
+            return await scrollToResult(for: request)
         case .windowList:
             return await windowListResult(for: request)
         case .windowFocus:
             return await windowFocusResult(for: request)
+        case .windowAssert:
+            return await windowAssertResult(for: request)
         case .windowExclude:
             return await windowFocusResult(for: request.with(arguments: ["operation": .string("exclude")]))
         case .mediaMusicVolume:
@@ -110,12 +139,16 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return await textAttachResult(for: request.with(arguments: ["operation": .string("detach")]))
         case .textInsert:
             return await textInsertResult(for: request)
+        case .textRead:
+            return await textReadResult(for: request)
         case .textSendKeys:
             return await textSendKeysResult(for: request)
         case .textMode:
             return await textModeResult(for: request)
         case .textStatus:
             return await textStatusResult(for: request)
+        case .menuSelect:
+            return await menuSelectResult(for: request)
         case .systemHealth, .systemSessions, .systemConfirmationResolve, .systemTrustedSessionStart, .systemTrustedSessionEnd, .remotePair, .remoteClients, .remoteRevoke:
             return ActionResult(
                 requestID: request.id,
@@ -640,7 +673,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             for step in actions {
                 guard let object = step.objectValue,
                       let rawTool = object["tool"]?.stringValue,
-                      let action = ActionName(rawValue: rawTool)
+                      let action = batchedActionName(from: rawTool)
                 else {
                     return ActionResult(
                         requestID: request.id,
@@ -666,7 +699,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         for step in actions {
             guard let object = step.objectValue,
                   let rawTool = object["tool"]?.stringValue,
-                  let action = ActionName(rawValue: rawTool)
+                  let action = batchedActionName(from: rawTool)
             else {
                 return ActionResult(
                     requestID: request.id,
@@ -829,7 +862,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             )
         }
 
-        let value = targetLookup.target.value ?? targetLookup.target.title
+        let value = preferredReadableText(for: targetLookup.target) ?? targetLookup.target.value ?? targetLookup.target.title
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
 
@@ -855,6 +888,452 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             outcome: .success,
             message: "Copied text from \(targetLookup.target.title).",
             payload: payload
+        )
+    }
+
+    private func uiOpenResult(for request: ActionRequest) async -> ActionResult {
+        await uiActResult(for: request.with(arguments: ["interaction": .string("press")]))
+    }
+
+    private func uiSelectResult(for request: ActionRequest) async -> ActionResult {
+        var additions: [String: JSONValue] = ["interaction": .string("press")]
+        if request.string(for: "query") == nil, let option = request.string(for: "option") {
+            additions["query"] = .string(option)
+        }
+        return await uiActResult(for: request.with(arguments: additions))
+    }
+
+    private func uiFocusResult(for request: ActionRequest) async -> ActionResult {
+        await uiActResult(for: request.with(arguments: ["interaction": .string("press")]))
+    }
+
+    private func uiToggleResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let targetResolution = resolveUITarget(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+        guard let targetLookup = targetResolution.targetLookup else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: "Unable to resolve the requested UI target."
+            )
+        }
+
+        if let requestedState = request.string(for: "state"),
+           let desired = desiredSelectionState(from: requestedState),
+           let current = targetLookup.target.isSelectedLike as Bool?,
+           current == desired {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .success,
+                message: "Target already matched the requested state.",
+                payload: baseTargetPayload(
+                    targetLookup: targetLookup,
+                    interaction: "toggle",
+                    extra: [
+                        "requestedState": .string(requestedState),
+                        "currentState": .bool(current),
+                        "changed": .bool(false),
+                    ]
+                )
+            )
+        }
+
+        let toggled = await uiActResult(for: request.with(arguments: ["interaction": .string("press")]))
+        guard let requestedState = request.string(for: "state"),
+              let desired = desiredSelectionState(from: requestedState),
+              let payload = toggled.payload?.objectValue
+        else {
+            return toggled
+        }
+
+        let postTargets = payload["postState"]?.objectValue?["targets"]?.arrayValue ?? []
+        let changed = postTargets.first?.objectValue?["value"]?.boolValue == desired
+        if toggled.outcome == .success, changed {
+            return toggled
+        }
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: changed ? .success : .failed,
+            message: changed ? toggled.message : "Toggled the control, but could not confirm the requested state.",
+            payload: toggled.payload
+        )
+    }
+
+    private func uiReadResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+        guard let snapshotResult = uiObservationSnapshot(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings,
+            forceRefresh: false
+        ) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .permissionRequired,
+                message: "Unable to inspect the requested application."
+            )
+        }
+
+        let matchedTargets = matchingTargets(in: snapshotResult.snapshot, for: request)
+        if let target = matchedTargets.first {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .success,
+                message: "Read UI target content.",
+                payload: [
+                    "text": preferredReadableText(for: target).map(JSONValue.string) ?? .null,
+                    "target": target.payload,
+                    "targetID": .string(target.id),
+                    "sessionID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                    "snapshotID": snapshotResult.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+                    "graphID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                    "windowTitle": snapshotResult.snapshot.windowTitle.map(JSONValue.string) ?? .null,
+                ]
+            )
+        }
+
+        let visibleText = visibleTextLines(in: snapshotResult.snapshot)
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Read visible UI content.",
+            payload: [
+                "windowTitle": snapshotResult.snapshot.windowTitle.map(JSONValue.string) ?? .null,
+                "sessionID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                "snapshotID": snapshotResult.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+                "graphID": snapshotResult.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                "text": .string(visibleText.joined(separator: "\n")),
+                "lines": .array(visibleText.map(JSONValue.string)),
+                "targets": .array(snapshotResult.snapshot.targets.prefix(25).map { $0.payload }),
+            ]
+        )
+    }
+
+    private func uiWaitResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let timeoutMs = max(request.int(for: "timeoutMs") ?? 2_500, 50)
+        let pollIntervalMs = max(request.int(for: "pollIntervalMs") ?? 120, 20)
+        let startedAt = Date()
+        var currentSessionID = request.string(for: "sessionID")
+        var lastOutcome: UIObservationOutcome?
+
+        while Int(Date().timeIntervalSince(startedAt) * 1_000) <= timeoutMs {
+            guard let snapshotResult = uiObservationSnapshot(
+                for: request,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                forceRefresh: currentSessionID != nil
+            ) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .permissionRequired,
+                    message: "Unable to inspect the requested application."
+                )
+            }
+
+            currentSessionID = snapshotResult.snapshot.sessionID
+            let outcome = observationOutcome(for: request, snapshot: snapshotResult.snapshot)
+            if outcome.passed {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .success,
+                    message: "UI condition matched.",
+                    payload: observationPayload(outcome: outcome, snapshot: snapshotResult.snapshot)
+                )
+            }
+            lastOutcome = outcome
+            try? await Task.sleep(nanoseconds: UInt64(pollIntervalMs) * 1_000_000)
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .notFound,
+            message: lastOutcome?.detail ?? "Timed out waiting for the requested UI condition.",
+            payload: lastOutcome.map { observationPayload(outcome: $0, snapshot: $0.snapshot) }
+        )
+    }
+
+    private func uiAssertResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        guard let snapshotResult = uiObservationSnapshot(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings,
+            forceRefresh: false
+        ) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .permissionRequired,
+                message: "Unable to inspect the requested application."
+            )
+        }
+
+        let outcome = observationOutcome(for: request, snapshot: snapshotResult.snapshot)
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: outcome.passed ? .success : .notFound,
+            message: outcome.detail,
+            payload: observationPayload(outcome: outcome, snapshot: snapshotResult.snapshot)
+        )
+    }
+
+    private func uiDiffResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let baselineSessionID = request.string(for: "baselineSessionID") ?? request.string(for: "sessionID")
+        guard let baselineSnapshot = snapshotter.sessionSnapshot(id: baselineSessionID) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "No cached baseline snapshot matched the request."
+            )
+        }
+        if let baselineSessionID {
+            _ = snapshotter.endSession(id: baselineSessionID)
+        }
+
+        guard let freshSnapshot = uiObservationSnapshot(
+            for: request.with(arguments: ["sessionID": .null]),
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings,
+            forceRefresh: true
+        )?.snapshot else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .permissionRequired,
+                message: "Unable to capture a fresh UI snapshot."
+            )
+        }
+
+        let diff = diffPayload(before: baselineSnapshot, after: freshSnapshot)
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Compared cached and fresh UI snapshots.",
+            payload: diff
+        )
+    }
+
+    private func uiWatchResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let timeoutMs = max(request.int(for: "timeoutMs") ?? 2_500, 50)
+        let pollIntervalMs = max(request.int(for: "pollIntervalMs") ?? 120, 20)
+        let baselineSessionID = request.string(for: "baselineSessionID") ?? request.string(for: "sessionID")
+
+        let baselineSnapshot: TargetSnapshot
+        if let cached = snapshotter.sessionSnapshot(id: baselineSessionID) {
+            baselineSnapshot = cached
+        } else if let captured = uiObservationSnapshot(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings,
+            forceRefresh: false
+        )?.snapshot {
+            baselineSnapshot = captured
+        } else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .permissionRequired,
+                message: "Unable to capture a baseline UI snapshot."
+            )
+        }
+
+        let startedAt = Date()
+        while Int(Date().timeIntervalSince(startedAt) * 1_000) <= timeoutMs {
+            if let baselineSessionID {
+                _ = snapshotter.endSession(id: baselineSessionID)
+            }
+            guard let snapshotResult = uiObservationSnapshot(
+                for: request.with(arguments: ["sessionID": .null]),
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                forceRefresh: true
+            ) else {
+                break
+            }
+
+            let diff = diffPayload(before: baselineSnapshot, after: snapshotResult.snapshot)
+            let changed = (diff.objectValue?["changed"]?.boolValue ?? false)
+            let outcome = observationOutcome(for: request, snapshot: snapshotResult.snapshot)
+            if changed || outcome.passed {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .success,
+                    message: outcome.passed ? "Observed requested UI condition." : "Observed UI changes.",
+                    payload: [
+                        "diff": diff,
+                        "observation": observationPayload(outcome: outcome, snapshot: snapshotResult.snapshot),
+                    ]
+                )
+            }
+            try? await Task.sleep(nanoseconds: UInt64(pollIntervalMs) * 1_000_000)
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .notFound,
+            message: "Timed out watching for UI changes."
+        )
+    }
+
+    private func uiSubmitResult(for request: ActionRequest) async -> ActionResult {
+        if request.string(for: "targetID") != nil || request.string(for: "query") != nil {
+            return await uiOpenResult(for: request)
+        }
+
+        let strategy = request.string(for: "strategy")?.lowercased() ?? "return"
+        let success: Bool
+        switch strategy {
+        case "command_return", "cmd_return", "cmd-enter":
+            success = postReturnKey(command: true)
+        default:
+            success = postReturnKey()
+        }
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Submitted the focused UI element." : "Unable to submit the focused UI element."
+        )
+    }
+
+    private func uiChooseFileResult(for request: ActionRequest) async -> ActionResult {
+        guard let path = request.string(for: "path"), path.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Missing path."
+            )
+        }
+
+        let insertArguments = propagatedUIArguments(from: request).merging(
+            [
+                "text": .string(path),
+                "submit": .bool(false),
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        let insertResult = await textInsertResult(
+            for: ActionRequest(
+                action: .textInsert,
+                arguments: insertArguments,
+                origin: request.origin
+            )
+        )
+        guard insertResult.outcome == .success else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: insertResult.outcome,
+                message: insertResult.message,
+                payload: insertResult.payload
+            )
+        }
+
+        if let confirmQuery = request.string(for: "confirmQuery"), confirmQuery.isEmpty == false {
+            let confirmArguments = propagatedUIArguments(from: request).merging(
+                ["query": .string(confirmQuery)],
+                uniquingKeysWith: { _, new in new }
+            )
+            let submitResult = await uiSubmitResult(
+                for: ActionRequest(action: .uiSubmit, arguments: confirmArguments, origin: request.origin)
+            )
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: submitResult.outcome,
+                message: submitResult.message,
+                payload: [
+                    "path": .string(path),
+                    "insert": insertResult.payload ?? .null,
+                    "submit": submitResult.payload ?? .null,
+                ]
+            )
+        }
+
+        if request.bool(for: "submit") == true {
+            let submitArguments = propagatedUIArguments(from: request).merging(
+                ["strategy": request.arguments["strategy"] ?? .string("return")],
+                uniquingKeysWith: { _, new in new }
+            )
+            let submitResult = await uiSubmitResult(
+                for: ActionRequest(action: .uiSubmit, arguments: submitArguments, origin: request.origin)
+            )
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: submitResult.outcome,
+                message: submitResult.message,
+                payload: [
+                    "path": .string(path),
+                    "insert": insertResult.payload ?? .null,
+                    "submit": submitResult.payload ?? .null,
+                ]
+            )
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Inserted the requested file path into the dialog.",
+            payload: [
+                "path": .string(path),
+                "insert": insertResult.payload ?? .null,
+            ]
         )
     }
 
@@ -986,6 +1465,113 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         )
     }
 
+    private func scrollToResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let timeoutMs = max(request.int(for: "timeoutMs") ?? 3_000, 100)
+        let pollIntervalMs = max(request.int(for: "pollIntervalMs") ?? 120, 20)
+        let maxSteps = max(request.int(for: "maxSteps") ?? 20, 1)
+        let direction = request.string(for: "direction") ?? "down"
+        let amount = request.int(for: "amount") ?? 3
+        var stepCount = 0
+        let startedAt = Date()
+        let observationLimit = max(request.int(for: "limit") ?? 250, 250)
+        defer { _ = scrollController.endSession() }
+
+        while Int(Date().timeIntervalSince(startedAt) * 1_000) <= timeoutMs, stepCount <= maxSteps {
+            guard let snapshotResult = uiObservationSnapshot(
+                for: request,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                forceRefresh: true,
+                minimumLimit: observationLimit,
+                bypassCache: true
+            ) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .permissionRequired,
+                    message: "Unable to inspect scrollable targets."
+                )
+            }
+
+            let matchCandidates = scrollMatchCandidates(
+                in: snapshotResult.snapshot,
+                for: request,
+                direction: direction
+            )
+            if matchCandidates.isEmpty == false,
+               let stabilizedMatch = await stabilizedScrollMatch(
+                   from: matchCandidates,
+                   request: request,
+                   snapshotResult: snapshotResult,
+                   resolvedApplication: resolvedApplication,
+                   currentSettings: currentSettings,
+                   direction: direction,
+                   pollIntervalMs: pollIntervalMs,
+                   maxSteps: maxSteps,
+                   observationLimit: observationLimit,
+                   stepCount: &stepCount
+               ) {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .success,
+                    message: "Found matching UI target while scrolling.",
+                    payload: [
+                        "target": stabilizedMatch.target.payload,
+                        "targetID": .string(stabilizedMatch.target.id),
+                        "stepCount": .number(Double(stepCount)),
+                        "sessionID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                        "snapshotID": stabilizedMatch.snapshot.snapshotID.map(JSONValue.string) ?? .null,
+                        "graphID": stabilizedMatch.snapshot.sessionID.map(JSONValue.string) ?? .null,
+                    ]
+                )
+            }
+
+            if stepCount == maxSteps {
+                break
+            }
+
+            if scrollController.currentSession() == nil {
+                guard scrollController.startSession(
+                    targetID: request.string(for: "scrollTargetID"),
+                    snapshot: snapshotResult.snapshot
+                ) != nil else {
+                    return ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "No scrollable container matched the request."
+                    )
+                }
+            }
+
+            guard scrollController.step(direction: direction, amount: amount, snapshot: snapshotResult.snapshot) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .failed,
+                    message: "Failed to scroll the active container."
+                )
+            }
+            stepCount += 1
+            try? await Task.sleep(nanoseconds: UInt64(pollIntervalMs) * 1_000_000)
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .notFound,
+            message: "Reached the scroll limit without finding a matching UI target.",
+            payload: ["stepCount": .number(Double(stepCount))]
+        )
+    }
+
     private func windowListResult(for request: ActionRequest) async -> ActionResult {
         let rules = await settings().excludedWindows
         let windows = windowController.visibleWindows(excluding: rules)
@@ -1001,10 +1587,13 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     private func windowFocusResult(for request: ActionRequest) async -> ActionResult {
         if request.string(for: "operation")?.lowercased() == "exclude" {
             let currentSettings = await settings()
+            let requestedWindowID = request.int(for: "windowID")
+            let requestedTitle = request.string(for: "title") ?? request.string(for: "query")
+            let requestedPID = request.int(for: "pid").map(Int32.init)
             guard let rule = windowController.excludeRule(
-                windowID: request.int(for: "windowID"),
-                title: request.string(for: "title"),
-                pid: request.int(for: "pid").map(Int32.init),
+                windowID: requestedWindowID,
+                title: requestedTitle,
+                pid: requestedPID,
                 excluding: currentSettings.excludedWindows
             ) else {
                 return ActionResult(
@@ -1033,16 +1622,37 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             )
         }
 
+        let requestedWindowID = request.int(for: "windowID")
+        let requestedTitle = request.string(for: "title") ?? request.string(for: "query")
+        let requestedPID = request.int(for: "pid").map(Int32.init)
         let didFocus = windowController.focus(
-            windowID: request.int(for: "windowID"),
-            title: request.string(for: "title"),
-            pid: request.int(for: "pid").map(Int32.init)
+            windowID: requestedWindowID,
+            title: requestedTitle,
+            pid: requestedPID
         )
         return ActionResult(
             requestID: request.id,
             action: request.action,
             outcome: didFocus ? .success : .failed,
             message: didFocus ? "Focused window." : "Unable to focus the requested window."
+        )
+    }
+
+    private func windowAssertResult(for request: ActionRequest) async -> ActionResult {
+        let rules = await settings().excludedWindows
+        let match = windowController.matchingWindow(
+            windowID: request.int(for: "windowID"),
+            title: request.string(for: "title"),
+            query: request.string(for: "query"),
+            pid: request.int(for: "pid").map(Int32.init),
+            excluding: rules
+        )
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: match == nil ? .notFound : .success,
+            message: match == nil ? "No visible window matched the request." : "Found matching window.",
+            payload: match?.payload
         )
     }
 
@@ -1240,10 +1850,18 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         }
 
         let submitResult = submit ? postReturnKey() : true
+        let postCapture = focusedTextBridge.captureFocusedContext()
+        let expectationsSatisfied = textInsertExpectationsSatisfied(
+            request: request,
+            insertedText: text,
+            initialContext: capture.context,
+            postContext: postCapture?.context,
+            submitResult: submitResult
+        )
         let actionMs = Date().timeIntervalSince(startedAt) * 1_000
         let postStateStartedAt = Date()
         let targetLookup = targetResolution.targetLookup
-        let postState = submitResult
+        let postState = submitResult && expectationsSatisfied
             ? await postActionStatePayload(
                 for: request,
                 pid: pid,
@@ -1287,11 +1905,172 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         return ActionResult(
             requestID: request.id,
             action: request.action,
-            outcome: submitResult ? .success : .failed,
-            message: submitResult
-                ? "Inserted text into the focused input."
-                : "Inserted text, but failed to submit.",
+            outcome: submitResult && expectationsSatisfied ? .success : .failed,
+            message: submitResult == false
+                ? "Inserted text, but failed to submit."
+                : (expectationsSatisfied ? "Inserted text into the focused input." : "Inserted text, but the requested postconditions did not match."),
             payload: payload
+        )
+    }
+
+    private func textReadResult(for request: ActionRequest) async -> ActionResult {
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        let pid = resolvedApplication.pid
+        let targetResolution = textInsertTargetLookup(
+            for: request,
+            pid: pid,
+            labelAlphabet: currentSettings.labelAlphabet
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+
+        if let targetLookup = targetResolution.targetLookup {
+            let didFocus = performInteraction(
+                "press",
+                on: targetLookup.target,
+                pid: pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                request: request
+            )
+            guard didFocus else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .failed,
+                    message: "Unable to focus the requested text target."
+                )
+            }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+
+        guard let capture = focusedTextBridge.captureFocusedContext() else {
+            if request.string(for: "query") != nil || request.string(for: "targetID") != nil {
+                return await uiReadResult(for: request)
+            }
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "No focused text input is available."
+            )
+        }
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .success,
+            message: "Read the focused text input.",
+            payload: [
+                "applicationBundleID": capture.context.applicationBundleID.map(JSONValue.string) ?? .null,
+                "application": capture.context.applicationName.map(JSONValue.string) ?? .null,
+                "processIdentifier": capture.context.processIdentifier.map { .number(Double($0)) } ?? .null,
+                "elementIdentifier": .string(capture.context.elementIdentifier),
+                "windowTitle": capture.context.windowTitle.map(JSONValue.string) ?? .null,
+                "text": .string(capture.context.text),
+                "cursor": [
+                    "location": .number(Double(capture.context.cursor.range.location)),
+                    "length": .number(Double(capture.context.cursor.range.length)),
+                    "preferredColumn": capture.context.cursor.preferredColumn.map { .number(Double($0)) } ?? .null,
+                ],
+                "isSecureInput": .bool(capture.context.isSecureInput),
+                "targetID": targetResolution.targetLookup.map { .string($0.target.id) } ?? .null,
+                "target": targetResolution.targetLookup.map { $0.target.payload } ?? .null,
+                "sessionID": targetResolution.targetLookup.map { .string($0.metrics.sessionID) } ?? request.arguments["sessionID"] ?? .null,
+                "snapshotID": targetResolution.targetLookup.map { .string($0.metrics.snapshotID) } ?? request.arguments["snapshotID"] ?? .null,
+                "graphID": targetResolution.targetLookup.map { .string($0.metrics.sessionID) } ?? request.arguments["graphID"] ?? request.arguments["sessionID"] ?? .null,
+            ]
+        )
+    }
+
+    private func menuSelectResult(for request: ActionRequest) async -> ActionResult {
+        let menuPath = menuPathComponents(from: request)
+        guard menuPath.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Missing menu path."
+            )
+        }
+
+        guard let appName = request.string(for: "app") ?? NSWorkspace.shared.frontmostApplication?.localizedName,
+              appName.isEmpty == false
+        else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "Unable to determine which application menu to control."
+            )
+        }
+
+        let quotedPath = menuPath.map(appleScriptStringLiteral).joined(separator: ", ")
+        let quotedApp = appleScriptStringLiteral(appName)
+        let script = """
+        set selectedPath to {\(quotedPath)}
+        set didSelect to false
+        tell application \(quotedApp) to activate
+        delay 0.05
+        tell application "System Events"
+            tell process \(quotedApp)
+                try
+                    set currentMenuBarItem to menu bar item (item 1 of selectedPath) of menu bar 1
+                    click currentMenuBarItem
+                    if (count of selectedPath) is 1 then
+                        set didSelect to true
+                    else
+                        set currentMenu to menu 1 of currentMenuBarItem
+                        repeat with idx from 2 to count of selectedPath
+                            set itemName to item idx of selectedPath
+                            set currentMenuItem to first menu item of currentMenu whose name is itemName
+                            if idx is (count of selectedPath) then
+                                click currentMenuItem
+                                set didSelect to true
+                            else
+                                set currentMenu to menu 1 of currentMenuItem
+                            end if
+                        end repeat
+                    end if
+                on error
+                    try
+                        key code 53
+                    end try
+                end try
+            end tell
+        end tell
+        return didSelect
+        """
+
+        guard let result = try? await shellRunner.run(
+            launchPath: "/usr/bin/osascript",
+            arguments: ["-e", script],
+            timeout: 2.0
+        ) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: "Unable to control the application menu."
+            )
+        }
+
+        let succeeded = result.terminationStatus == 0 &&
+            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: succeeded ? .success : .notFound,
+            message: succeeded ? "Selected the requested menu item." : "Could not find the requested menu path.",
+            payload: [
+                "app": .string(appName),
+                "menuPath": .array(menuPath.map(JSONValue.string)),
+            ]
         )
     }
 
@@ -1473,6 +2252,21 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             }
         }
 
+        if let destinationQuery = request.string(for: "destinationQuery") ?? request.string(for: "toQuery"),
+           destinationQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+           let searchResult = snapshotter.search(
+               query: destinationQuery,
+               pid: pid,
+               labelAlphabet: labelAlphabet,
+               limit: max(request.int(for: "limit") ?? 1, 1),
+               sessionID: request.string(for: "sessionID"),
+               scope: searchScope(for: request),
+               includeMenus: includeMenus(for: request)
+           ),
+           let frame = searchResult.snapshot.targets.first?.frame {
+            return frame.center
+        }
+
         return nil
     }
 
@@ -1580,6 +2374,18 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         var failure: ActionResult?
     }
 
+    private struct UIObservationSnapshotResult {
+        var snapshot: TargetSnapshot
+        var metrics: UISessionMetrics
+    }
+
+    private struct UIObservationOutcome {
+        var passed: Bool
+        var detail: String
+        var matchedTargets: [TargetDescriptor]
+        var snapshot: TargetSnapshot
+    }
+
     private func requestedPostActionState(for request: ActionRequest) -> PostActionStateMode {
         let nextLimit = max(request.int(for: "nextLimit") ?? 20, 1)
         if let nextQuery = request.string(for: "nextQuery") {
@@ -1676,6 +2482,578 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         return nil
     }
 
+    private func dragArguments(for request: ActionRequest) -> [String: JSONValue] {
+        var arguments = request.arguments
+        arguments["interaction"] = .string("drag")
+
+        if arguments["targetID"] == nil,
+           arguments["query"] == nil,
+           let sourceQuery = request.string(for: "sourceQuery")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           sourceQuery.isEmpty == false {
+            arguments["query"] = .string(sourceQuery)
+        }
+
+        if arguments["destinationTargetID"] == nil, let value = arguments["toTargetID"] {
+            arguments["destinationTargetID"] = value
+        }
+
+        if arguments["destinationQuery"] == nil,
+           let destinationQuery = request.string(for: "destinationQuery") ?? request.string(for: "toQuery"),
+           destinationQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            arguments["destinationQuery"] = .string(destinationQuery)
+        }
+
+        return arguments
+    }
+
+    private func desiredSelectionState(from rawValue: String) -> Bool? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on", "checked", "selected", "enabled":
+            return true
+        case "0", "false", "no", "off", "unchecked", "unselected", "disabled":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private func uiObservationSnapshot(
+        for request: ActionRequest,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings,
+        forceRefresh: Bool,
+        minimumLimit: Int = 25,
+        bypassCache: Bool = false
+    ) -> UIObservationSnapshotResult? {
+        let sessionID = forceRefresh ? nil : request.string(for: "sessionID")
+
+        if forceRefresh == false,
+           bypassCache == false,
+           let cachedSnapshot = snapshotter.sessionSnapshot(id: sessionID) {
+            let cachedSessionID = cachedSnapshot.sessionID ?? sessionID ?? UUID().uuidString
+            let cachedSnapshotID = cachedSnapshot.snapshotID ?? UUID().uuidString
+            return UIObservationSnapshotResult(
+                snapshot: cachedSnapshot,
+                metrics: UISessionMetrics(
+                    sessionID: cachedSessionID,
+                    snapshotID: cachedSnapshotID,
+                    appName: cachedSnapshot.appName,
+                    windowTitle: cachedSnapshot.windowTitle,
+                    targetCount: cachedSnapshot.targets.count,
+                    cacheHit: true,
+                    cacheHitRate: 1,
+                    lastRefreshedAt: cachedSnapshot.generatedAt,
+                    snapshotMs: 0,
+                    cacheLookupMs: 0,
+                    rankingMs: 0
+                )
+            )
+        }
+
+        guard let searchResult = snapshotter.search(
+            query: "",
+            pid: resolvedApplication.pid,
+            labelAlphabet: currentSettings.labelAlphabet,
+            limit: max(request.int(for: "limit") ?? minimumLimit, minimumLimit),
+            sessionID: sessionID,
+            scope: searchScope(for: request),
+            includeMenus: includeMenus(for: request),
+            bypassCache: bypassCache
+        ) else {
+            return nil
+        }
+
+        return UIObservationSnapshotResult(snapshot: searchResult.snapshot, metrics: searchResult.metrics)
+    }
+
+    private func matchingTargets(in snapshot: TargetSnapshot, for request: ActionRequest) -> [TargetDescriptor] {
+        if let requestedTargetID = request.string(for: "targetID") ?? request.string(for: "query").flatMap(inferredTargetID(from:)) {
+            return snapshot.targets.filter { $0.id == requestedTargetID }
+        }
+
+        guard let query = request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              query.isEmpty == false
+        else {
+            return snapshot.targets
+        }
+
+        let limit = max(request.int(for: "limit") ?? 25, 1)
+        let directMatches = snapshot.targets
+            .compactMap { target -> (TargetDescriptor, Int)? in
+                let exactScore = FuzzyMatcher.exactMatchScore(query: query, in: target)
+                if exactScore > 0 {
+                    return (target, exactScore + 1_000)
+                }
+
+                let directScore = FuzzyMatcher.directTextScore(query: query, in: target)
+                guard directScore > 0 else { return nil }
+                return (target, directScore + 700)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 {
+                    return lhs.1 > rhs.1
+                }
+                return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+            }
+            .map(\.0)
+
+        if directMatches.isEmpty == false {
+            return Array(directMatches.prefix(limit))
+        }
+
+        return SemanticTargetRanker.rankedTargets(in: snapshot, query: query, limit: limit)
+    }
+
+    private func scrollMatchingTargets(in snapshot: TargetSnapshot, for request: ActionRequest) -> [TargetDescriptor] {
+        scrollMatchCandidates(
+            in: snapshot,
+            for: request,
+            direction: request.string(for: "direction") ?? "down"
+        ).map(\.0)
+    }
+
+    private func scrollMatchCandidates(
+        in snapshot: TargetSnapshot,
+        for request: ActionRequest,
+        direction: String
+    ) -> [(TargetDescriptor, Int)] {
+        if let requestedTargetID = request.string(for: "targetID") ?? request.string(for: "query").flatMap(inferredTargetID(from:)) {
+            return snapshot.targets
+                .filter { $0.id == requestedTargetID }
+                .map { ($0, Int.max) }
+        }
+
+        guard let query = request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              query.isEmpty == false
+        else {
+            return snapshot.targets.map { ($0, 0) }
+        }
+
+        let limit = max(request.int(for: "limit") ?? 25, 1)
+        let container = resolvedScrollContainer(in: snapshot, for: request)
+        var matchesByID: [String: (TargetDescriptor, Int)] = [:]
+
+        for target in snapshot.targets {
+            let baseScore: Int
+            if let requestedTargetID = request.string(for: "targetID"), target.id == requestedTargetID {
+                baseScore = Int.max / 4
+            } else {
+                let exactScore = FuzzyMatcher.exactMatchScore(query: query, in: target)
+                if exactScore > 0 {
+                    baseScore = exactScore + 1_000
+                } else {
+                    let strictScore = FuzzyMatcher.strictTextScore(query: query, in: target)
+                    guard strictScore > 0 else { continue }
+                    baseScore = strictScore + 700
+                }
+            }
+
+            let totalScore = baseScore + scrollVisibilityBonus(
+                for: target,
+                container: container,
+                direction: direction
+            )
+
+            if let existing = matchesByID[target.id], existing.1 >= totalScore {
+                continue
+            }
+            matchesByID[target.id] = (target, totalScore)
+        }
+
+        return matchesByID.values
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 {
+                    return lhs.1 > rhs.1
+                }
+                let leftArea = (lhs.0.frame?.width ?? 0) * (lhs.0.frame?.height ?? 0)
+                let rightArea = (rhs.0.frame?.width ?? 0) * (rhs.0.frame?.height ?? 0)
+                if leftArea != rightArea {
+                    return leftArea > rightArea
+                }
+                return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+            }
+            .prefix(limit)
+            .map { ($0.0, $0.1) }
+    }
+
+    private func stabilizedScrollMatch(
+        from matches: [(TargetDescriptor, Int)],
+        request: ActionRequest,
+        snapshotResult: UIObservationSnapshotResult,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings,
+        direction: String,
+        pollIntervalMs: Int,
+        maxSteps: Int,
+        observationLimit: Int,
+        stepCount: inout Int
+    ) async -> (target: TargetDescriptor, snapshot: TargetSnapshot)? {
+        guard let initialMatch = matches.first?.0 else { return nil }
+
+        let initialContainer = resolvedScrollContainer(in: snapshotResult.snapshot, for: request)
+        if isStableScrollMatch(initialMatch, container: initialContainer, direction: direction) {
+            return (initialMatch, snapshotResult.snapshot)
+        }
+        guard stepCount < maxSteps else { return nil }
+
+        guard let correctiveDirection = oppositeScrollDirection(from: direction) else {
+            return nil
+        }
+
+        if scrollController.currentSession() == nil,
+           scrollController.startSession(
+               targetID: request.string(for: "scrollTargetID"),
+               snapshot: snapshotResult.snapshot
+           ) == nil {
+            return nil
+        }
+
+        var latestSnapshotResult = snapshotResult
+
+        for _ in 0..<2 {
+            guard stepCount < maxSteps else { break }
+            guard scrollController.step(direction: correctiveDirection, amount: 1, snapshot: latestSnapshotResult.snapshot) else {
+                break
+            }
+            stepCount += 1
+            try? await Task.sleep(nanoseconds: UInt64(pollIntervalMs) * 1_000_000)
+
+            guard let refreshedSnapshotResult = uiObservationSnapshot(
+                for: request,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings,
+                forceRefresh: true,
+                minimumLimit: observationLimit,
+                bypassCache: true
+            ) else {
+                break
+            }
+
+            latestSnapshotResult = refreshedSnapshotResult
+            guard let refreshedMatch = scrollMatchCandidates(
+                in: refreshedSnapshotResult.snapshot,
+                for: request,
+                direction: direction
+            ).first?.0 else {
+                break
+            }
+
+            let refreshedContainer = resolvedScrollContainer(in: refreshedSnapshotResult.snapshot, for: request)
+            if isStableScrollMatch(refreshedMatch, container: refreshedContainer, direction: direction) {
+                return (refreshedMatch, refreshedSnapshotResult.snapshot)
+            }
+        }
+
+        return nil
+    }
+
+    private func resolvedScrollContainer(in snapshot: TargetSnapshot, for request: ActionRequest) -> TargetDescriptor? {
+        if let currentSessionTargetID = scrollController.currentSession()?.targetID,
+           let currentSessionTarget = snapshot.targets.first(where: { $0.id == currentSessionTargetID }) {
+            return currentSessionTarget
+        }
+
+        if let requestedTargetID = request.string(for: "scrollTargetID"),
+           let requestedTarget = snapshot.targets.first(where: { $0.id == requestedTargetID }) {
+            return requestedTarget
+        }
+
+        return scrollController.scrollTargets(from: snapshot).first
+    }
+
+    private func scrollVisibilityBonus(
+        for target: TargetDescriptor,
+        container: TargetDescriptor?,
+        direction: String
+    ) -> Int {
+        guard let targetFrame = target.frame?.cgRect else { return 0 }
+
+        var score = 0
+        if targetFrame.height >= 24 {
+            score += 24
+        } else if targetFrame.height < 10 {
+            score -= 60
+        }
+
+        if targetFrame.width >= 160 {
+            score += 16
+        } else if targetFrame.width < 60 {
+            score -= 24
+        }
+
+        guard let containerFrame = container?.frame?.cgRect else { return score }
+        let visibleRect = targetFrame.intersection(containerFrame)
+        guard visibleRect.isNull == false, visibleRect.width > 0, visibleRect.height > 0 else {
+            return score - 120
+        }
+
+        let visibleHeightRatio = visibleRect.height / max(targetFrame.height, 1)
+        if visibleHeightRatio >= 0.98 {
+            score += 40
+        } else if visibleHeightRatio >= 0.80 {
+            score += 28
+        } else if visibleHeightRatio >= 0.65 {
+            score += 12
+        } else {
+            score -= 60
+        }
+
+        let edgeMargin = scrollEdgeMargin(for: containerFrame)
+        switch direction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "up":
+            if visibleRect.minY <= containerFrame.minY + edgeMargin {
+                score -= 50
+            }
+        case "down":
+            if visibleRect.maxY >= containerFrame.maxY - edgeMargin {
+                score -= 50
+            }
+        default:
+            break
+        }
+
+        return score
+    }
+
+    private func isStableScrollMatch(
+        _ target: TargetDescriptor,
+        container: TargetDescriptor?,
+        direction: String
+    ) -> Bool {
+        guard let targetFrame = target.frame?.cgRect else { return true }
+        guard targetFrame.width >= 48, targetFrame.height >= 10 else { return false }
+        guard let containerFrame = container?.frame?.cgRect else { return true }
+
+        let visibleRect = targetFrame.intersection(containerFrame)
+        guard visibleRect.isNull == false, visibleRect.width > 0, visibleRect.height > 0 else { return false }
+
+        let visibleHeightRatio = visibleRect.height / max(targetFrame.height, 1)
+        guard visibleHeightRatio >= 0.65 else { return false }
+
+        let edgeMargin = scrollEdgeMargin(for: containerFrame)
+        switch direction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "up":
+            return visibleRect.minY > containerFrame.minY + edgeMargin
+        case "down":
+            return visibleRect.maxY < containerFrame.maxY - edgeMargin
+        default:
+            return true
+        }
+    }
+
+    private func scrollEdgeMargin(for containerFrame: CGRect) -> CGFloat {
+        max(12, min(32, containerFrame.height * 0.08))
+    }
+
+    private func oppositeScrollDirection(from direction: String) -> String? {
+        switch direction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "up":
+            return "down"
+        case "down":
+            return "up"
+        case "left":
+            return "right"
+        case "right":
+            return "left"
+        default:
+            return nil
+        }
+    }
+
+
+    private func preferredReadableText(for target: TargetDescriptor) -> String? {
+        let candidates = [target.value ?? "", target.title, target.subtitle ?? "", target.hint ?? "", target.path.last ?? ""]
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty == false {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private func visibleTextLines(in snapshot: TargetSnapshot) -> [String] {
+        var seen = Set<String>()
+        var lines: [String] = []
+        for target in snapshot.targets {
+            guard let text = preferredReadableText(for: target) else { continue }
+            if seen.insert(text).inserted {
+                lines.append(text)
+            }
+        }
+        return lines
+    }
+
+    private func observationOutcome(for request: ActionRequest, snapshot: TargetSnapshot) -> UIObservationOutcome {
+        let normalizedQuery = request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedText = request.string(for: "text")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedWindowTitle = request.string(for: "windowTitle")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let expectGone = request.bool(for: "gone") ?? false
+        let hasSelector = request.string(for: "targetID") != nil || normalizedQuery.isEmpty == false
+
+        var matchedTargets = hasSelector ? matchingTargets(in: snapshot, for: request) : snapshot.targets
+
+        if normalizedText.isEmpty == false {
+            matchedTargets = matchedTargets.filter { target in
+                let haystack = [
+                    preferredReadableText(for: target) ?? "",
+                    target.hint ?? "",
+                    target.path.joined(separator: " "),
+                ]
+                .joined(separator: "\n")
+                return haystack.localizedCaseInsensitiveContains(normalizedText)
+            }
+        }
+
+        if let requestedState = request.string(for: "state"),
+           let desiredState = desiredSelectionState(from: requestedState) {
+            matchedTargets = matchedTargets.filter { $0.isSelectedLike == desiredState }
+        }
+
+        let matchCount = matchedTargets.count
+        var passed = true
+        var detailComponents: [String] = []
+
+        if normalizedWindowTitle.isEmpty == false {
+            let windowMatches = (snapshot.windowTitle ?? "").localizedCaseInsensitiveContains(normalizedWindowTitle)
+            passed = passed && windowMatches
+            detailComponents.append(windowMatches ? "Window title matched." : "Window title did not match.")
+        }
+
+        if expectGone {
+            let gone = matchCount == 0
+            passed = passed && gone
+            detailComponents.append(gone ? "Target is gone." : "Target is still visible.")
+        } else if let exactCount = request.int(for: "count") {
+            let countMatches = matchCount == exactCount
+            passed = passed && countMatches
+            detailComponents.append(countMatches ? "Found exactly \(exactCount) match(es)." : "Found \(matchCount) match(es), expected \(exactCount).")
+        } else {
+            if let minCount = request.int(for: "minCount") {
+                let countMatches = matchCount >= minCount
+                passed = passed && countMatches
+                detailComponents.append(countMatches ? "Found at least \(minCount) match(es)." : "Found \(matchCount) match(es), expected at least \(minCount).")
+            }
+            if let maxCount = request.int(for: "maxCount") {
+                let countMatches = matchCount <= maxCount
+                passed = passed && countMatches
+                detailComponents.append(countMatches ? "Found at most \(maxCount) match(es)." : "Found \(matchCount) match(es), expected at most \(maxCount).")
+            }
+        }
+
+        if expectGone == false,
+           request.int(for: "count") == nil,
+           request.int(for: "minCount") == nil,
+           request.int(for: "maxCount") == nil,
+           (hasSelector || normalizedText.isEmpty == false)
+        {
+            let found = matchCount > 0
+            passed = passed && found
+            detailComponents.append(found ? "Found matching UI content." : "No matching UI content is currently visible.")
+        }
+
+        if detailComponents.isEmpty {
+            let hasVisibleTargets = snapshot.targets.isEmpty == false
+            passed = hasVisibleTargets
+            detailComponents.append(hasVisibleTargets ? "Captured visible UI content." : "No visible UI content is available.")
+        }
+
+        return UIObservationOutcome(
+            passed: passed,
+            detail: detailComponents.joined(separator: " "),
+            matchedTargets: matchedTargets,
+            snapshot: snapshot
+        )
+    }
+
+    private func observationPayload(outcome: UIObservationOutcome, snapshot: TargetSnapshot) -> JSONValue {
+        [
+            "passed": .bool(outcome.passed),
+            "detail": .string(outcome.detail),
+            "matchedCount": .number(Double(outcome.matchedTargets.count)),
+            "targets": .array(outcome.matchedTargets.prefix(25).map { $0.payload }),
+            "appName": .string(snapshot.appName),
+            "windowTitle": snapshot.windowTitle.map(JSONValue.string) ?? .null,
+            "sessionID": snapshot.sessionID.map(JSONValue.string) ?? .null,
+            "snapshotID": snapshot.snapshotID.map(JSONValue.string) ?? .null,
+            "graphID": snapshot.sessionID.map(JSONValue.string) ?? .null,
+        ]
+    }
+
+    private func diffPayload(before: TargetSnapshot, after: TargetSnapshot) -> JSONValue {
+        let beforeByID = Dictionary(uniqueKeysWithValues: before.targets.map { ($0.id, $0) })
+        let afterByID = Dictionary(uniqueKeysWithValues: after.targets.map { ($0.id, $0) })
+
+        let beforeIDs = Set(beforeByID.keys)
+        let afterIDs = Set(afterByID.keys)
+
+        let added = after.targets.filter { beforeIDs.contains($0.id) == false }
+        let removed = before.targets.filter { afterIDs.contains($0.id) == false }
+        let updated = after.targets.filter { target in
+            guard let prior = beforeByID[target.id] else { return false }
+            return prior != target
+        }
+
+        let changed = before.appName != after.appName ||
+            before.windowTitle != after.windowTitle ||
+            before.bundleIdentifier != after.bundleIdentifier ||
+            added.isEmpty == false ||
+            removed.isEmpty == false ||
+            updated.isEmpty == false
+
+        return [
+            "changed": .bool(changed),
+            "before": [
+                "appName": .string(before.appName),
+                "bundleIdentifier": before.bundleIdentifier.map(JSONValue.string) ?? .null,
+                "windowTitle": before.windowTitle.map(JSONValue.string) ?? .null,
+                "targetCount": .number(Double(before.targets.count)),
+                "sessionID": before.sessionID.map(JSONValue.string) ?? .null,
+                "snapshotID": before.snapshotID.map(JSONValue.string) ?? .null,
+            ],
+            "after": [
+                "appName": .string(after.appName),
+                "bundleIdentifier": after.bundleIdentifier.map(JSONValue.string) ?? .null,
+                "windowTitle": after.windowTitle.map(JSONValue.string) ?? .null,
+                "targetCount": .number(Double(after.targets.count)),
+                "sessionID": after.sessionID.map(JSONValue.string) ?? .null,
+                "snapshotID": after.snapshotID.map(JSONValue.string) ?? .null,
+            ],
+            "addedTargets": .array(added.prefix(25).map { $0.payload }),
+            "removedTargets": .array(removed.prefix(25).map { $0.payload }),
+            "updatedTargets": .array(updated.prefix(25).map { $0.payload }),
+        ]
+    }
+
+    private func propagatedUIArguments(from request: ActionRequest) -> [String: JSONValue] {
+        let keys = [
+            "targetID",
+            "query",
+            "limit",
+            "pid",
+            "app",
+            "sessionID",
+            "snapshotID",
+            "scope",
+            "includeMenus",
+            "launchIfNeeded",
+            "activate",
+            "postState",
+            "nextQuery",
+            "nextLimit",
+            "debugTimings",
+            "autoTrust",
+            "trustedSessionID",
+            "adapter",
+        ]
+
+        return keys.reduce(into: [String: JSONValue]()) { partialResult, key in
+            if let value = request.arguments[key], value != .null {
+                partialResult[key] = value
+            }
+        }
+    }
+
     private func textInsertTargetLookup(
         for request: ActionRequest,
         pid: pid_t?,
@@ -1706,6 +3084,29 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         guard let query = request.string(for: "query") else {
             return TextInsertTargetResolution(targetLookup: nil, failure: nil)
+        }
+
+        if let targetID = inferredTargetID(from: query) {
+            guard let lookup = snapshotter.target(
+                id: targetID,
+                pid: pid,
+                labelAlphabet: labelAlphabet,
+                sessionID: request.string(for: "sessionID"),
+                snapshotID: request.string(for: "snapshotID"),
+                scope: searchScope(for: request),
+                includeMenus: includeMenus(for: request)
+            ) else {
+                return TextInsertTargetResolution(
+                    targetLookup: nil,
+                    failure: ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "Target not found."
+                    )
+                )
+            }
+            return TextInsertTargetResolution(targetLookup: lookup, failure: nil)
         }
 
         guard let searchResult = snapshotter.search(
@@ -1779,6 +3180,47 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             ambient["graphID"] = sessionID
         }
         return ambient
+    }
+
+    private func batchedActionName(from rawTool: String) -> ActionName? {
+        if let action = ActionName(rawValue: rawTool) {
+            return action
+        }
+
+        switch rawTool.lowercased() {
+        case "search":
+            return .uiSearch
+        case "act", "click":
+            return .uiAct
+        case "copy":
+            return .uiCopy
+        case "open":
+            return .uiOpen
+        case "focus":
+            return .uiFocus
+        case "select":
+            return .uiSelect
+        case "toggle":
+            return .uiToggle
+        case "read":
+            return .uiRead
+        case "wait":
+            return .uiWait
+        case "until":
+            return .uiUntil
+        case "assert":
+            return .uiAssert
+        case "diff":
+            return .uiDiff
+        case "watch":
+            return .uiWatch
+        case "submit":
+            return .uiSubmit
+        case "choose_file", "choosefile":
+            return .uiChooseFile
+        default:
+            return nil
+        }
     }
 
     private func interpolateBatchArguments(
@@ -2046,7 +3488,40 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         context.cursor.range = TextRange(location: cursorLocation, length: 0)
     }
 
-    private func postReturnKey() -> Bool {
+    private func textInsertExpectationsSatisfied(
+        request: ActionRequest,
+        insertedText: String,
+        initialContext: TextContextSnapshot,
+        postContext: TextContextSnapshot?,
+        submitResult: Bool
+    ) -> Bool {
+        guard submitResult else { return false }
+
+        if let expectText = request.string(for: "expectText"),
+           expectText.isEmpty == false,
+           (postContext?.text.localizedCaseInsensitiveContains(expectText) ?? false) == false {
+            return false
+        }
+
+        if request.bool(for: "expectCleared") == true,
+           (postContext?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) == false {
+            return false
+        }
+
+        if request.bool(for: "expectSent") == true {
+            guard request.bool(for: "submit") == true else { return false }
+            let currentText = postContext?.text ?? ""
+            let cleared = currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let changedAwayFromInserted = currentText != initialContext.text && currentText.contains(insertedText) == false
+            if cleared == false && changedAwayFromInserted == false {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func postReturnKey(command: Bool = false) -> Bool {
         guard
             let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true),
             let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: false)
@@ -2054,6 +3529,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return false
         }
 
+        if command {
+            keyDown.flags = .maskCommand
+            keyUp.flags = .maskCommand
+        }
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
         return true
@@ -2104,6 +3583,33 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         default:
             return nil
         }
+    }
+
+    private func menuPathComponents(from request: ActionRequest) -> [String] {
+        if let explicit = request.array(for: "menuPath")?
+            .compactMap(\.stringValue)
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .filter({ $0.isEmpty == false }),
+           explicit.isEmpty == false {
+            return explicit
+        }
+
+        let rawPath = request.string(for: "path") ?? ""
+        if rawPath.contains(">") {
+            return rawPath
+                .split(separator: ">")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+        }
+
+        return rawPath.isEmpty ? [] : [rawPath]
+    }
+
+    private func appleScriptStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     private func textAttachmentPayload(_ attachment: TextAttachment) -> JSONValue {

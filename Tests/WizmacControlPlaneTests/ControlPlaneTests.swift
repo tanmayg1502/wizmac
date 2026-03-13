@@ -60,6 +60,30 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(copyProperties["limit"]?.stringValue, "number")
     }
 
+    func testExpandedToolSchemasExposeHighLevelSelectorsAndVerificationArguments() throws {
+        let uiOpen = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "ui.open"))
+        let scrollTo = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "scroll.to"))
+        let windowAssert = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "window.assert"))
+        let textRead = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "text.read"))
+        let menuSelect = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "menu.select"))
+        let textInsert = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "text.insert"))
+
+        let uiOpenProperties = try XCTUnwrap(uiOpen.inputSchema.objectValue?["properties"]?.objectValue)
+        let scrollToProperties = try XCTUnwrap(scrollTo.inputSchema.objectValue?["properties"]?.objectValue)
+        let windowAssertProperties = try XCTUnwrap(windowAssert.inputSchema.objectValue?["properties"]?.objectValue)
+        let textReadProperties = try XCTUnwrap(textRead.inputSchema.objectValue?["properties"]?.objectValue)
+        let menuSelectProperties = try XCTUnwrap(menuSelect.inputSchema.objectValue?["properties"]?.objectValue)
+        let textInsertProperties = try XCTUnwrap(textInsert.inputSchema.objectValue?["properties"]?.objectValue)
+
+        XCTAssertEqual(uiOpenProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(scrollToProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(windowAssertProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(textReadProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(menuSelectProperties["path"]?.stringValue, "string")
+        XCTAssertEqual(textInsertProperties["expectText"]?.stringValue, "string")
+        XCTAssertEqual(textInsertProperties["expectSent"]?.stringValue, "boolean")
+    }
+
     func testDispatcherCallsSharedRouter() async throws {
         let router = ClosureControlPlaneRouter { request in
             ControlPlaneActionResponse(

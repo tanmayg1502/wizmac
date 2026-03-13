@@ -181,7 +181,8 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         limit: Int,
         sessionID: String?,
         scope: UISearchScope,
-        includeMenus: Bool
+        includeMenus: Bool,
+        bypassCache: Bool
     ) -> UISearchResult? {
         pruneExpiredSessions()
 
@@ -189,7 +190,7 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         let currentWindowTitle = currentWindowTitle(for: resolvedPID)
 
         let cacheLookupStartedAt = Date()
-        var cachedSession = loadCachedSession(
+        var cachedSession = bypassCache ? nil : loadCachedSession(
             sessionID: sessionID,
             pid: resolvedPID,
             scope: scope,
@@ -348,6 +349,13 @@ public final class AccessibilitySnapshotter: AccessibilitySnapshotting {
         pruneExpiredSessions()
         guard let lastSessionID, let cachedSession = sessionsByID[lastSessionID] else { return nil }
         return metrics(for: cachedSession, cacheHit: false, snapshotMs: 0, cacheLookupMs: 0, rankingMs: 0)
+    }
+
+    func sessionSnapshot(id: String?) -> TargetSnapshot? {
+        pruneExpiredSessions()
+        let sessionID = id ?? lastSessionID
+        guard let sessionID, let cachedSession = sessionsByID[sessionID] else { return nil }
+        return cachedSession.snapshot
     }
 
     public func hintSession(query: String?, labelAlphabet: String, limit: Int = 50) -> UIHintSession? {

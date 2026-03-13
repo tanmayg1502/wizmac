@@ -5,6 +5,18 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case uiSearch = "ui.search"
     case uiAct = "ui.act"
     case uiCopy = "ui.copy"
+    case uiOpen = "ui.open"
+    case uiSelect = "ui.select"
+    case uiToggle = "ui.toggle"
+    case uiFocus = "ui.focus"
+    case uiRead = "ui.read"
+    case uiWait = "ui.wait"
+    case uiUntil = "ui.until"
+    case uiAssert = "ui.assert"
+    case uiDiff = "ui.diff"
+    case uiWatch = "ui.watch"
+    case uiSubmit = "ui.submit"
+    case uiChooseFile = "ui.choose_file"
     case uiCapture = "ui.capture"
     case uiPrefetch = "ui.prefetch"
     case uiExecute = "ui.execute"
@@ -16,15 +28,21 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case scrollStep = "scroll.step"
     case scrollSessionStart = "scroll.session_start"
     case scrollSessionEnd = "scroll.session_end"
+    case scrollTo = "scroll.to"
+    case scrollUntil = "scroll.until"
+    case scrollIntoView = "scroll.into_view"
     case windowList = "window.list"
     case windowFocus = "window.focus"
+    case windowAssert = "window.assert"
     case windowExclude = "window.exclude"
     case textAttach = "text.attach"
     case textDetach = "text.detach"
     case textInsert = "text.insert"
+    case textRead = "text.read"
     case textSendKeys = "text.send_keys"
     case textMode = "text.mode"
     case textStatus = "text.status"
+    case menuSelect = "menu.select"
     case mediaMusicVolume = "media.music_volume"
     case displayAirPlayDevices = "display.airplay_devices"
     case displayAirPlayConnect = "display.airplay_connect"
@@ -498,6 +516,12 @@ public extension ActionName {
     static let defaultAutoApprovedActions: [ActionName] = [
         .uiApps,
         .uiSearch,
+        .uiRead,
+        .uiWait,
+        .uiUntil,
+        .uiAssert,
+        .uiDiff,
+        .uiWatch,
         .uiHints,
         .uiSessionEnd,
         .scrollTargets,
@@ -505,7 +529,9 @@ public extension ActionName {
         .scrollStep,
         .scrollSessionStart,
         .scrollSessionEnd,
+        .windowAssert,
         .windowList,
+        .textRead,
         .textStatus,
         .systemPermissions,
         .systemPermissionsRequest,
@@ -523,13 +549,23 @@ public extension ActionName {
     static let defaultRiskyActions: [ActionName] = [
         .uiAct,
         .uiCopy,
+        .uiOpen,
+        .uiSelect,
+        .uiToggle,
+        .uiFocus,
+        .uiSubmit,
+        .uiChooseFile,
         .uiDrag,
+        .menuSelect,
         .windowFocus,
         .windowExclude,
         .textAttach,
         .textDetach,
         .textInsert,
         .textSendKeys,
+        .scrollTo,
+        .scrollUntil,
+        .scrollIntoView,
         .mediaMusicVolume,
         .displayAirPlayConnect,
         .displayAirPlayDisconnect,
