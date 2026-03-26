@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
       MACOS_SIGNING_CERT_BASE64: ${{ secrets.MACOS_SIGNING_CERT_BASE64 }}
@@ -28,7 +28,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "16.4"
 
       - name: Resolve version
         id: version
