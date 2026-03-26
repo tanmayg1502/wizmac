@@ -3,8 +3,80 @@ import XCTest
 @testable import WizmacControlPlane
 
 final class CLITimingTests: XCTestCase {
-    func testAllRegisteredToolCallsEmitLatencySamples() throws {
-        let toolNames = ControlPlaneToolRegistry.default.allTools().map(\.name)
+    func testTimingFlagsRoundTripThroughCallSyntax() throws {
+        let sample = try runCLI(
+            arguments: [
+                "call",
+                "ui.act",
+                "query=Primary",
+                "--pre-delay-ms",
+                "17",
+                "--post-delay-ms",
+                "29",
+                "--timeout-ms",
+                "41",
+            ],
+            fixture: fixtureConfiguration(delayMs: 15, toolNames: ["ui.act"])
+        )
+        let response = try decode(sample.standardOutput, as: ControlPlaneActionResponse.self)
+
+        XCTAssertEqual(sample.terminationStatus, 0, sample.combinedOutput)
+        XCTAssertEqual(response.status, .success)
+        XCTAssertGreaterThan(sample.durationMs, 0, sample.combinedOutput)
+    }
+
+    func testTimingFlagsRoundTripThroughNamespacedSyntax() throws {
+        let sample = try runCLI(
+            arguments: [
+                "ui",
+                "act",
+                "--query",
+                "Primary",
+                "--pre-delay-ms",
+                "17",
+                "--post-delay-ms",
+                "29",
+                "--timeout-ms",
+                "41",
+            ],
+            fixture: fixtureConfiguration(delayMs: 15, toolNames: ["ui.act"])
+        )
+        let response = try decode(sample.standardOutput, as: ControlPlaneActionResponse.self)
+
+        XCTAssertEqual(sample.terminationStatus, 0, sample.combinedOutput)
+        XCTAssertEqual(response.status, .success)
+        XCTAssertGreaterThan(sample.durationMs, 0, sample.combinedOutput)
+    }
+
+    func testKeyCommandFamilyDispatchesCanonicalToolNames() throws {
+        let comboSample = try runCLI(
+            arguments: ["key", "combo", "--mods", "cmd,shift", "--key", "z"],
+            fixture: fixtureConfiguration(delayMs: 10, toolNames: ["input.key_combo"])
+        )
+        let sequenceSample = try runCLI(
+            arguments: ["key", "sequence", "cmd+a,delete,cmd+v"],
+            fixture: fixtureConfiguration(delayMs: 10, toolNames: ["input.key_sequence"])
+        )
+        let typeSample = try runCLI(
+            arguments: ["key", "type", "hello"],
+            fixture: fixtureConfiguration(delayMs: 10, toolNames: ["text.insert"])
+        )
+
+        XCTAssertEqual(try decode(comboSample.standardOutput, as: ControlPlaneActionResponse.self).status, .success)
+        XCTAssertEqual(try decode(sequenceSample.standardOutput, as: ControlPlaneActionResponse.self).status, .success)
+        XCTAssertEqual(try decode(typeSample.standardOutput, as: ControlPlaneActionResponse.self).status, .success)
+    }
+
+    func testConcreteRegisteredToolCallsEmitLatencySamples() throws {
+        let excludedSyntheticTools = Set([
+            "batch.run",
+            "wait.ui.exists",
+            "wait.window.focused",
+            "wait.condition",
+        ])
+        let toolNames = ControlPlaneToolRegistry.default.allTools()
+            .map(\.name)
+            .filter { excludedSyntheticTools.contains($0) == false }
         let fixture = fixtureConfiguration(delayMs: 12, toolNames: toolNames)
 
         var reportLines: [String] = []
@@ -19,6 +91,162 @@ final class CLITimingTests: XCTestCase {
         }
 
         print("CLI latency samples by tool:\n" + reportLines.joined(separator: "\n"))
+    }
+
+    func testBatchAndWaitToolCallsEmitLatencySamples() throws {
+        let fixture = fixtureConfiguration(
+            delayMs: 12,
+            toolResponses: [
+                "ui.search": FixtureToolResponse(
+                    delayMs: 12,
+                    response: ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .object([
+                            "tool": .string("ui.search"),
+                            "targets": .array([
+                                .object([
+                                    "id": .string("button-1"),
+                                    "title": .string("Primary Action"),
+                                ]),
+                            ]),
+                        ]),
+                        message: "Fixture response."
+                    )
+                ),
+                "window.list": FixtureToolResponse(
+                    delayMs: 12,
+                    response: ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .array([
+                            .object([
+                                "id": .number(1),
+                                "title": .string("Fixture Primary"),
+                                "appName": .string("WizmacFixtureHost"),
+                                "pid": .number(4242),
+                            ]),
+                        ]),
+                        message: "Fixture response."
+                    )
+                ),
+            ]
+        )
+
+        let batchSample = try runCLI(
+            arguments: [
+                "batch",
+                "--step",
+                "ui.search query=Primary",
+                "--step",
+                "wait.ui.exists query=Primary timeoutMs=250 intervalMs=20",
+                "--cache-policy",
+                "step",
+                "--snapshot-reuse",
+                "best-effort",
+                "--invalidate-on",
+                "ui.act,ui.gesture",
+            ],
+            fixture: fixture
+        )
+        let waitWindowSample = try runCLI(
+            arguments: [
+                "call",
+                "wait.window.focused",
+                "query=Fixture",
+                "timeoutMs=250",
+                "intervalMs=20",
+            ],
+            fixture: fixture
+        )
+        let waitConditionSample = try runCLI(
+            arguments: [
+                "call",
+                "wait.condition",
+                "predicate=ui.exists",
+                "query=Primary",
+                "timeoutMs=250",
+                "intervalMs=20",
+            ],
+            fixture: fixture
+        )
+
+        let batchResponse = try decode(batchSample.standardOutput, as: ControlPlaneActionResponse.self)
+        let waitWindowResponse = try decode(waitWindowSample.standardOutput, as: ControlPlaneActionResponse.self)
+        let waitConditionResponse = try decode(waitConditionSample.standardOutput, as: ControlPlaneActionResponse.self)
+
+        XCTAssertEqual(batchSample.terminationStatus, 0, batchSample.combinedOutput)
+        XCTAssertEqual(waitWindowSample.terminationStatus, 0, waitWindowSample.combinedOutput)
+        XCTAssertEqual(waitConditionSample.terminationStatus, 0, waitConditionSample.combinedOutput)
+        XCTAssertEqual(batchResponse.status, .success)
+        XCTAssertEqual(batchResponse.payload?["cachePolicy"]?.stringValue, "step")
+        XCTAssertEqual(batchResponse.payload?["snapshotReuse"]?.stringValue, "best_effort")
+        XCTAssertEqual(batchResponse.payload?["stepCount"]?.intValue, 2)
+        XCTAssertEqual(waitWindowResponse.status, .success)
+        XCTAssertEqual(waitConditionResponse.status, .success)
+    }
+
+    func testInitBootstrapWritesSampleBatchAndReadinessSummary() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let batchPath = directory.appendingPathComponent("wizmac.sample.wzb")
+        let fixture = fixtureConfiguration(
+            delayMs: 8,
+            toolResponses: [
+                "system.health": FixtureToolResponse(
+                    delayMs: 8,
+                    response: ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .object([:]),
+                        message: "Shared service is reachable."
+                    )
+                ),
+                "system.permissions": FixtureToolResponse(
+                    delayMs: 8,
+                    response: ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .array([
+                            .object([
+                                "name": .string("accessibility"),
+                                "state": .string("available"),
+                                "detail": .string("Accessibility access is available."),
+                            ]),
+                            .object([
+                                "name": .string("screen_recording"),
+                                "state": .string("permissionRequired"),
+                                "detail": .string("Screen recording access improves window and non-AX inspection."),
+                            ]),
+                        ]),
+                        message: "Permissions checked."
+                    )
+                ),
+                "remote.clients": FixtureToolResponse(
+                    delayMs: 8,
+                    response: ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .array([]),
+                        message: "No paired clients."
+                    )
+                ),
+            ]
+        )
+
+        let sample = try runCLI(
+            arguments: [
+                "init",
+                "--sample-batch-file",
+                batchPath.path,
+            ],
+            fixture: fixture
+        )
+
+        let stdout = String(decoding: sample.standardOutput, as: UTF8.self)
+        let batchContents = try String(contentsOf: batchPath, encoding: .utf8)
+
+        XCTAssertEqual(sample.terminationStatus, 0, sample.combinedOutput)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: batchPath.path))
+        XCTAssertTrue(stdout.contains("Service is healthy."))
+        XCTAssertTrue(stdout.contains("Missing or incomplete permissions: screen_recording"))
+        XCTAssertTrue(stdout.contains("wizmac remote pair --name"))
+        XCTAssertTrue(batchContents.contains("wait.ui.exists"))
     }
 
     func testCallSyntaxMeasuresEndToEndLatency() throws {
@@ -142,8 +370,8 @@ private extension CLITimingTests {
         delayMs: Double,
         toolNames: [String]
     ) -> FixtureControlPlaneEnvironmentConfiguration {
-        FixtureControlPlaneEnvironmentConfiguration(
-            defaultDelayMs: nil,
+        fixtureConfiguration(
+            delayMs: delayMs,
             toolResponses: Dictionary(uniqueKeysWithValues: toolNames.map { toolName in
                 (
                     toolName,
@@ -165,6 +393,16 @@ private extension CLITimingTests {
                     )
                 )
             })
+        )
+    }
+
+    func fixtureConfiguration(
+        delayMs: Double,
+        toolResponses: [String: FixtureToolResponse]
+    ) -> FixtureControlPlaneEnvironmentConfiguration {
+        FixtureControlPlaneEnvironmentConfiguration(
+            defaultDelayMs: nil,
+            toolResponses: toolResponses
         )
     }
 

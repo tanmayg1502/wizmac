@@ -66,6 +66,8 @@ public enum ServiceSessionKind: String, Codable, Sendable {
     case ui
     case scroll
     case text
+    case mediaRecording = "media_recording"
+    case mediaStreaming = "media_streaming"
     case trustedAutomation = "trusted_automation"
     case hotkey
     case remote
@@ -201,6 +203,59 @@ public struct TrustedAutomationSessionState: Codable, Equatable, Sendable {
         self.bundleIdentifier = bundleIdentifier
         self.startedAt = startedAt
         self.expiresAt = expiresAt
+    }
+}
+
+public struct MediaRecordingSessionState: Codable, Equatable, Sendable {
+    public var isActive: Bool
+    public var sessionID: String?
+    public var path: String?
+    public var codec: String?
+    public var fps: Int?
+    public var scopeDescription: String?
+    public var startedAt: Date?
+
+    public init(
+        isActive: Bool = false,
+        sessionID: String? = nil,
+        path: String? = nil,
+        codec: String? = nil,
+        fps: Int? = nil,
+        scopeDescription: String? = nil,
+        startedAt: Date? = nil
+    ) {
+        self.isActive = isActive
+        self.sessionID = sessionID
+        self.path = path
+        self.codec = codec
+        self.fps = fps
+        self.scopeDescription = scopeDescription
+        self.startedAt = startedAt
+    }
+}
+
+public struct MediaStreamSessionState: Codable, Equatable, Sendable {
+    public var isActive: Bool
+    public var sessionID: String?
+    public var format: String?
+    public var endpoint: String?
+    public var scopeDescription: String?
+    public var startedAt: Date?
+
+    public init(
+        isActive: Bool = false,
+        sessionID: String? = nil,
+        format: String? = nil,
+        endpoint: String? = nil,
+        scopeDescription: String? = nil,
+        startedAt: Date? = nil
+    ) {
+        self.isActive = isActive
+        self.sessionID = sessionID
+        self.format = format
+        self.endpoint = endpoint
+        self.scopeDescription = scopeDescription
+        self.startedAt = startedAt
     }
 }
 
@@ -439,6 +494,8 @@ public struct WizmacServiceSnapshot: Codable, Equatable, Sendable {
     public var uiSession: UISessionState
     public var hintSession: HintSessionState
     public var scrollSession: ScrollSessionState
+    public var mediaRecordingSession: MediaRecordingSessionState
+    public var mediaStreamSession: MediaStreamSessionState
     public var trustedAutomationSession: TrustedAutomationSessionState
 
     public init(
@@ -453,6 +510,8 @@ public struct WizmacServiceSnapshot: Codable, Equatable, Sendable {
         uiSession: UISessionState = UISessionState(),
         hintSession: HintSessionState = HintSessionState(),
         scrollSession: ScrollSessionState = ScrollSessionState(),
+        mediaRecordingSession: MediaRecordingSessionState = MediaRecordingSessionState(),
+        mediaStreamSession: MediaStreamSessionState = MediaStreamSessionState(),
         trustedAutomationSession: TrustedAutomationSessionState = TrustedAutomationSessionState()
     ) {
         self.health = health
@@ -466,6 +525,8 @@ public struct WizmacServiceSnapshot: Codable, Equatable, Sendable {
         self.uiSession = uiSession
         self.hintSession = hintSession
         self.scrollSession = scrollSession
+        self.mediaRecordingSession = mediaRecordingSession
+        self.mediaStreamSession = mediaStreamSession
         self.trustedAutomationSession = trustedAutomationSession
     }
 }

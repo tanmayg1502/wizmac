@@ -129,6 +129,38 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(statusAfterDetach.outcome, .notFound)
     }
 
+    func testTimedMutationPathTimesOutWhenPreDelayExceedsTimeout() async throws {
+        let target = sampleTarget(id: "button-1", title: "Primary Action", role: "AXButton")
+        let snapshotter = SnapshotterStub(snapshot: sampleSnapshot(targets: [target]), hintSession: nil)
+        snapshotter.targetsByID[target.id] = target
+        let sleeper = RecordingSleeperStub()
+        let dependencies = try makeDependencies(
+            snapshotter: snapshotter,
+            pointerPerformer: PointerStub(),
+            sleeper: sleeper
+        )
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .uiAct,
+                arguments: [
+                    "targetID": .string(target.id),
+                    "interaction": .string("press"),
+                    "preDelayMs": .number(200),
+                    "timeoutMs": .number(50),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        let recordedSleeps = await sleeper.recordedSleeps()
+
+        XCTAssertEqual(result.outcome, .failed)
+        XCTAssertEqual(result.message, "Timed out after 50 ms.")
+        XCTAssertTrue(recordedSleeps.contains(50))
+        XCTAssertTrue(recordedSleeps.contains(200))
+    }
+
     func testUITextSendKeysCoalescesPlainTextIntoBulkInsert() async throws {
         let bridge = FocusedTextBridgeStub(
             capture: FocusedTextCapture(
@@ -149,6 +181,237 @@ final class ExecutorContractTests: XCTestCase {
         XCTAssertEqual(result.outcome, .success)
         XCTAssertEqual(bridge.syncedContexts.last?.text, " worldhello world")
         XCTAssertTrue(bridge.appliedCommands.isEmpty)
+    }
+
+    func testMediaScreenshotNormalizesFormatAndScopeAtExecutorBoundary() async throws {
+        let window = VisibleWindow(id: 88, appName: "FixtureHost", title: "Primary Panel", pid: 42, frame: TargetRect(x: 4, y: 8, width: 120, height: 80))
+        let windowController = WindowControllerStub()
+        windowController.visibleWindowsValue = [window]
+        let mediaController = ScreenMediaControllerStub(
+            screenshotResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Captured screenshot.",
+                payload: [
+                    "path": .string("/tmp/capture.jpg"),
+                    "format": .string("jpg"),
+                    "scope": .string("window:FixtureHost/Primary Panel"),
+                ]
+            )
+        )
+        let dependencies = try makeDependencies(
+            windowController: windowController,
+            screenMediaController: mediaController
+        )
+
+        let result = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaScreenshot,
+                arguments: [
+                    "windowID": .number(Double(window.id)),
+                    "path": .string("/tmp/capture.jpg"),
+                    "format": .string("JPEG"),
+                    "includeCursor": .bool(true),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        let screenshotRequests = await mediaController.screenshotRequests()
+
+        XCTAssertEqual(result.outcome, .success)
+        XCTAssertEqual(result.payload?.objectValue?["format"]?.stringValue, "jpg")
+        XCTAssertEqual(result.payload?.objectValue?["scope"]?.stringValue, "window:FixtureHost/Primary Panel")
+        XCTAssertEqual(screenshotRequests.count, 1)
+        XCTAssertEqual(screenshotRequests.first?.format, "jpg")
+        XCTAssertEqual(screenshotRequests.first?.scope.windowID, window.id)
+        XCTAssertEqual(screenshotRequests.first?.includeCursor, true)
+    }
+
+    func testMediaRecordAndStreamRouteNormalizedSessionPayloads() async throws {
+        let window = VisibleWindow(id: 21, appName: "FixtureHost", title: "Inspector", pid: 99, frame: TargetRect(x: 10, y: 10, width: 300, height: 240))
+        let windowController = WindowControllerStub()
+        windowController.visibleWindowsValue = [window]
+        let mediaController = ScreenMediaControllerStub(
+            screenshotResult: ScreenMediaOperationResult(outcome: .success, message: "ok", payload: nil),
+            recordingResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Started screen recording.",
+                payload: [
+                    "sessionID": .string("rec-1"),
+                    "status": .string("recording"),
+                    "path": .string("/tmp/recording.mov"),
+                    "codec": .string("hevc"),
+                    "fps": .number(30),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            ),
+            recordingStatusResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Recording is active.",
+                payload: [
+                    "sessionID": .string("rec-1"),
+                    "status": .string("recording"),
+                    "path": .string("/tmp/recording.mov"),
+                    "codec": .string("hevc"),
+                    "fps": .number(30),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            ),
+            recordingStopResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Stopped screen recording.",
+                payload: [
+                    "sessionID": .string("rec-1"),
+                    "status": .string("stopped"),
+                    "path": .string("/tmp/recording.mov"),
+                    "codec": .string("hevc"),
+                    "fps": .number(30),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            ),
+            streamStartResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Started local screen stream.",
+                payload: [
+                    "sessionID": .string("stream-1"),
+                    "status": .string("streaming"),
+                    "format": .string("mjpeg"),
+                    "endpoint": .string("tcp://127.0.0.1:5000"),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            ),
+            streamStatusResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Stream is active.",
+                payload: [
+                    "sessionID": .string("stream-1"),
+                    "status": .string("streaming"),
+                    "format": .string("mjpeg"),
+                    "endpoint": .string("tcp://127.0.0.1:5000"),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            ),
+            streamStopResult: ScreenMediaOperationResult(
+                outcome: .success,
+                message: "Stopped local screen stream.",
+                payload: [
+                    "sessionID": .string("stream-1"),
+                    "status": .string("stopped"),
+                    "format": .string("mjpeg"),
+                    "endpoint": .string("tcp://127.0.0.1:5000"),
+                    "scope": .string("full_screen"),
+                    "startedAt": .string("2026-03-19T00:00:00Z"),
+                ]
+            )
+        )
+        let dependencies = try makeDependencies(
+            windowController: windowController,
+            screenMediaController: mediaController
+        )
+
+        let recordStart = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaRecord,
+                arguments: [
+                    "operation": .string("start"),
+                    "sessionID": .string("rec-1"),
+                    "path": .string("/tmp/recording.mov"),
+                    "codec": .string("HEVC"),
+                    "fps": .number(30),
+                    "maxDurationSeconds": .number(9),
+                    "includeCursor": .bool(true),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let recordStatus = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaRecord,
+                arguments: [
+                    "operation": .string("status"),
+                    "sessionID": .string("rec-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let recordStop = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaRecord,
+                arguments: [
+                    "operation": .string("stop"),
+                    "sessionID": .string("rec-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let streamStart = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaStream,
+                arguments: [
+                    "operation": .string("start"),
+                    "format": .string("MJPEG"),
+                    "endpoint": .string("tcp://127.0.0.1:5000"),
+                    "sessionID": .string("stream-1"),
+                    "fps": .number(15),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let streamStatus = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaStream,
+                arguments: [
+                    "operation": .string("status"),
+                    "sessionID": .string("stream-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+        let streamStop = await dependencies.executor.execute(
+            ActionRequest(
+                action: .mediaStream,
+                arguments: [
+                    "operation": .string("stop"),
+                    "sessionID": .string("stream-1"),
+                ],
+                origin: RequestOrigin(kind: .test)
+            )
+        )
+
+        let recordRequests = await mediaController.recordingRequests()
+        let streamRequests = await mediaController.streamRequests()
+
+        XCTAssertEqual(recordStart.outcome, .success)
+        XCTAssertEqual(recordStart.payload?.objectValue?["sessionID"]?.stringValue, "rec-1")
+        XCTAssertEqual(recordStart.payload?.objectValue?["codec"]?.stringValue, "hevc")
+        XCTAssertEqual(recordStatus.outcome, .success)
+        XCTAssertEqual(recordStatus.payload?.objectValue?["status"]?.stringValue, "recording")
+        XCTAssertEqual(recordStop.outcome, .success)
+        XCTAssertEqual(recordStop.payload?.objectValue?["status"]?.stringValue, "stopped")
+        XCTAssertEqual(streamStart.outcome, .success)
+        XCTAssertEqual(streamStart.payload?.objectValue?["format"]?.stringValue, "mjpeg")
+        XCTAssertEqual(streamStatus.outcome, .success)
+        XCTAssertEqual(streamStatus.payload?.objectValue?["endpoint"]?.stringValue, "tcp://127.0.0.1:5000")
+        XCTAssertEqual(streamStop.outcome, .success)
+        XCTAssertEqual(streamStop.payload?.objectValue?["status"]?.stringValue, "stopped")
+        XCTAssertEqual(recordRequests.count, 1)
+        XCTAssertEqual(recordRequests.first?.codec, "hevc")
+        XCTAssertEqual(recordRequests.first?.fps, 30)
+        XCTAssertEqual(recordRequests.first?.maxDurationSeconds, 9)
+        XCTAssertEqual(recordRequests.first?.includeCursor, true)
+        XCTAssertNil(recordRequests.first?.scope.windowID)
+        XCTAssertEqual(recordRequests.first?.scope.description, "full_screen")
+        XCTAssertEqual(streamRequests.count, 1)
+        XCTAssertEqual(streamRequests.first?.format, "mjpeg")
+        XCTAssertEqual(streamRequests.first?.fps, 15)
+        XCTAssertEqual(streamRequests.first?.endpoint, "tcp://127.0.0.1:5000")
+        XCTAssertNil(streamRequests.first?.scope.windowID)
+        XCTAssertEqual(streamRequests.first?.scope.description, "full_screen")
     }
 
     func testUISearchReturnsSessionMetadataAndDebugTimings() async throws {
@@ -1177,7 +1440,9 @@ private extension ExecutorContractTests {
         airPlayController: AirPlayControllerStub = AirPlayControllerStub(),
         focusedTextBridge: FocusedTextBridgeStub = FocusedTextBridgeStub(capture: nil),
         pointerPerformer: PointerStub = PointerStub(),
-        shellRunner: any ShellRunning = ShellRunnerStub()
+        screenMediaController: any ScreenMediaControlling = ScreenMediaControllerStub(),
+        shellRunner: any ShellRunning = ShellRunnerStub(),
+        sleeper: any AutomationSleeping = TaskAutomationSleeper()
     ) throws -> Dependencies {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1192,10 +1457,12 @@ private extension ExecutorContractTests {
             scrollController: scrollController,
             musicController: musicController,
             airPlayController: airPlayController,
+            screenMediaController: screenMediaController,
             textService: TextModeService(engine: FallbackTextModeEngine()),
             focusedTextBridge: focusedTextBridge,
             pointerPerformer: pointerPerformer,
-            shellRunner: shellRunner
+            shellRunner: shellRunner,
+            sleeper: sleeper
         )
         return Dependencies(executor: executor, settingsStore: settingsStore)
     }
@@ -1386,18 +1653,19 @@ private final class SnapshotterStub: AccessibilitySnapshotting {
     }
 }
 
-private final class WindowControllerStub: WindowControlling {
-    let excludeRuleValue: ExcludedWindowRule?
-    var focusCalls: [(windowID: Int?, title: String?, pid: Int32?)] = []
-    var matchedWindow: VisibleWindow?
+    private final class WindowControllerStub: WindowControlling {
+        let excludeRuleValue: ExcludedWindowRule?
+        var focusCalls: [(windowID: Int?, title: String?, pid: Int32?)] = []
+        var matchedWindow: VisibleWindow?
+        var visibleWindowsValue: [VisibleWindow] = []
 
-    init(excludeRule: ExcludedWindowRule? = nil) {
-        self.excludeRuleValue = excludeRule
-    }
+        init(excludeRule: ExcludedWindowRule? = nil) {
+            self.excludeRuleValue = excludeRule
+        }
 
-    func visibleWindows(excluding _: [ExcludedWindowRule]) -> [VisibleWindow] {
-        []
-    }
+        func visibleWindows(excluding _: [ExcludedWindowRule]) -> [VisibleWindow] {
+            visibleWindowsValue
+        }
 
     func focus(windowID: Int?, title: String?, pid: Int32?) -> Bool {
         focusCalls.append((windowID, title, pid))
@@ -1488,6 +1756,123 @@ private final class PointerStub: PointerAutomationPerforming {
     func drag(from start: CGPoint, to end: CGPoint, steps: Int) -> Bool {
         drags.append((start, end, steps))
         return true
+    }
+}
+
+private actor RecordingSleeperStub: AutomationSleeping {
+    private(set) var sleeps: [Int] = []
+
+    func sleep(milliseconds: Int) async {
+        sleeps.append(milliseconds)
+        guard milliseconds > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+    }
+
+    func recordedSleeps() -> [Int] {
+        sleeps
+    }
+}
+
+private actor ScreenMediaControllerStub: ScreenMediaControlling {
+    private(set) var screenshotInvocationPayloads: [ScreenshotCaptureRequest] = []
+    private(set) var recordingInvocationPayloads: [ScreenRecordingRequest] = []
+    private(set) var streamInvocationPayloads: [ScreenStreamRequest] = []
+
+    var screenshotResult: ScreenMediaOperationResult
+    var recordingResult: ScreenMediaOperationResult
+    var recordingStatusResult: ScreenMediaOperationResult
+    var recordingStopResult: ScreenMediaOperationResult
+    var streamStartResult: ScreenMediaOperationResult
+    var streamStatusResult: ScreenMediaOperationResult
+    var streamStopResult: ScreenMediaOperationResult
+
+    init(
+        screenshotResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Captured screenshot.",
+            payload: nil
+        ),
+        recordingResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Started screen recording.",
+            payload: nil
+        ),
+        recordingStatusResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Recording is active.",
+            payload: nil
+        ),
+        recordingStopResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Stopped screen recording.",
+            payload: nil
+        ),
+        streamStartResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Started local screen stream.",
+            payload: nil
+        ),
+        streamStatusResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Stream is active.",
+            payload: nil
+        ),
+        streamStopResult: ScreenMediaOperationResult = ScreenMediaOperationResult(
+            outcome: .success,
+            message: "Stopped local screen stream.",
+            payload: nil
+        )
+    ) {
+        self.screenshotResult = screenshotResult
+        self.recordingResult = recordingResult
+        self.recordingStatusResult = recordingStatusResult
+        self.recordingStopResult = recordingStopResult
+        self.streamStartResult = streamStartResult
+        self.streamStatusResult = streamStatusResult
+        self.streamStopResult = streamStopResult
+    }
+
+    func screenshot(_ request: ScreenshotCaptureRequest) async -> ScreenMediaOperationResult {
+        screenshotInvocationPayloads.append(request)
+        return screenshotResult
+    }
+
+    func startRecording(_ request: ScreenRecordingRequest) async -> ScreenMediaOperationResult {
+        recordingInvocationPayloads.append(request)
+        return recordingResult
+    }
+
+    func stopRecording(sessionID _: String?) async -> ScreenMediaOperationResult {
+        recordingStopResult
+    }
+
+    func recordingStatus(sessionID _: String?) async -> ScreenMediaOperationResult {
+        recordingStatusResult
+    }
+
+    func startStream(_ request: ScreenStreamRequest) async -> ScreenMediaOperationResult {
+        streamInvocationPayloads.append(request)
+        return streamStartResult
+    }
+
+    func stopStream(sessionID _: String?) async -> ScreenMediaOperationResult {
+        streamStopResult
+    }
+
+    func streamStatus(sessionID _: String?) async -> ScreenMediaOperationResult {
+        streamStatusResult
+    }
+
+    func screenshotRequests() -> [ScreenshotCaptureRequest] {
+        screenshotInvocationPayloads
+    }
+
+    func recordingRequests() -> [ScreenRecordingRequest] {
+        recordingInvocationPayloads
+    }
+
+    func streamRequests() -> [ScreenStreamRequest] {
+        streamInvocationPayloads
     }
 }
 

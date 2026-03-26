@@ -12,18 +12,27 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         var unresolvedApp: String?
     }
 
+    private struct ParsedKeySequenceStep {
+        var events: [SynthesizedKeyEvent]
+        var delayAfterMs: Int
+    }
+
     private let settingsStore: SettingsStore
     private let auditStore: AuditStore
     private let snapshotter: any AccessibilitySnapshotting
     private let permissionInspector: PermissionInspector
     private let windowController: any WindowControlling
     private let scrollController: any ScrollControlling
+    private let gestureScrollPerformer: any ScrollEventPerforming
     private let musicController: any MusicVolumeControlling
     private let airPlayController: any AirPlayControlling
+    private let screenMediaController: any ScreenMediaControlling
     private let textService: TextModeService
     private let focusedTextBridge: any FocusedTextBridging
     private let pointerPerformer: any PointerAutomationPerforming
+    private let keyboardPerformer: any KeyboardAutomationPerforming
     private let shellRunner: any ShellRunning
+    private let sleeper: any AutomationSleeping
     private var activeTextAttachmentID: TextAttachmentID?
     private var activeTextElement: AXUIElement?
 
@@ -34,12 +43,16 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         permissionInspector: PermissionInspector = PermissionInspector(),
         windowController: any WindowControlling = WindowController(),
         scrollController: any ScrollControlling = ScrollController(),
+        gestureScrollPerformer: any ScrollEventPerforming = CGScrollEventPerformer(),
         musicController: any MusicVolumeControlling = MusicController(),
         airPlayController: any AirPlayControlling = AirPlayController(),
+        screenMediaController: any ScreenMediaControlling = ScreenMediaController(),
         textService: TextModeService = TextModeService(),
         focusedTextBridge: any FocusedTextBridging = FocusedTextBridge(),
         pointerPerformer: any PointerAutomationPerforming = CGPointerAutomationPerformer(),
-        shellRunner: any ShellRunning = ShellCommandRunner()
+        keyboardPerformer: any KeyboardAutomationPerforming = CGKeyboardAutomationPerformer(),
+        shellRunner: any ShellRunning = ShellCommandRunner(),
+        sleeper: any AutomationSleeping = TaskAutomationSleeper()
     ) {
         self.settingsStore = settingsStore
         self.auditStore = auditStore
@@ -47,12 +60,16 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         self.permissionInspector = permissionInspector
         self.windowController = windowController
         self.scrollController = scrollController
+        self.gestureScrollPerformer = gestureScrollPerformer
         self.musicController = musicController
         self.airPlayController = airPlayController
+        self.screenMediaController = screenMediaController
         self.textService = textService
         self.focusedTextBridge = focusedTextBridge
         self.pointerPerformer = pointerPerformer
+        self.keyboardPerformer = keyboardPerformer
         self.shellRunner = shellRunner
+        self.sleeper = sleeper
     }
 
     public func execute(_ request: ActionRequest) async -> ActionResult {
@@ -68,7 +85,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         case .uiSearch:
             return await uiSearchResult(for: request)
         case .uiAct:
-            return await uiActResult(for: request)
+            return await timedMutationResult(for: request) {
+                await self.uiActResult(for: request)
+            }
         case .uiCopy:
             return await uiCopyResult(for: request)
         case .uiOpen:
@@ -102,7 +121,21 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         case .uiHints:
             return await uiSearchResult(for: request.with(arguments: ["operation": .string("hints")]))
         case .uiDrag:
-            return await uiActResult(for: request.with(arguments: dragArguments(for: request)))
+            return await timedMutationResult(for: request) {
+                await self.uiActResult(for: request.with(arguments: self.dragArguments(for: request)))
+            }
+        case .inputKeyCombo:
+            return await timedMutationResult(for: request) {
+                await self.inputKeyComboResult(for: request)
+            }
+        case .inputKeySequence:
+            return await timedMutationResult(for: request) {
+                await self.inputKeySequenceResult(for: request)
+            }
+        case .uiGesture:
+            return await timedMutationResult(for: request) {
+                await self.uiGestureResult(for: request)
+            }
         case .uiSessionEnd:
             return await uiSessionEndResult(for: request)
         case .scrollTargets:
@@ -125,6 +158,12 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return await windowAssertResult(for: request)
         case .windowExclude:
             return await windowFocusResult(for: request.with(arguments: ["operation": .string("exclude")]))
+        case .mediaScreenshot:
+            return await mediaScreenshotResult(for: request)
+        case .mediaRecord:
+            return await mediaRecordResult(for: request)
+        case .mediaStream:
+            return await mediaStreamResult(for: request)
         case .mediaMusicVolume:
             return await musicVolumeResult(for: request)
         case .displayAirPlayDevices:
@@ -142,7 +181,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         case .textRead:
             return await textReadResult(for: request)
         case .textSendKeys:
-            return await textSendKeysResult(for: request)
+            return await timedMutationResult(for: request) {
+                await self.textSendKeysResult(for: request)
+            }
         case .textMode:
             return await textModeResult(for: request)
         case .textStatus:
@@ -201,6 +242,51 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
     private func debugTimingsRequested(for request: ActionRequest) -> Bool {
         request.bool(for: "debugTimings") ?? false
+    }
+
+    private func requestedDelayMs(for key: String, in request: ActionRequest) -> Int {
+        max(request.int(for: key) ?? 0, 0)
+    }
+
+    private func applyPreMutationDelay(for request: ActionRequest) async {
+        await sleeper.sleep(milliseconds: requestedDelayMs(for: "preDelayMs", in: request))
+    }
+
+    private func applyPostMutationDelay(for request: ActionRequest) async {
+        await sleeper.sleep(milliseconds: requestedDelayMs(for: "postDelayMs", in: request))
+    }
+
+    private func timedMutationResult(
+        for request: ActionRequest,
+        operation: @escaping @Sendable () async -> ActionResult
+    ) async -> ActionResult {
+        let timeoutMs = max(request.int(for: "timeoutMs") ?? 0, 0)
+        guard timeoutMs > 0 else {
+            return await operation()
+        }
+
+        return await withTaskGroup(of: ActionResult.self) { group in
+            group.addTask {
+                await operation()
+            }
+            group.addTask {
+                await self.sleeper.sleep(milliseconds: timeoutMs)
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .failed,
+                    message: "Timed out after \(timeoutMs) ms."
+                )
+            }
+            let result = await group.next() ?? ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: "Timed out after \(timeoutMs) ms."
+            )
+            group.cancelAll()
+            return result
+        }
     }
 
     private func unresolvedApplicationResult(for request: ActionRequest, app: String) -> ActionResult {
@@ -792,6 +878,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let interaction = request.string(for: "interaction") ?? "press"
         let startedAt = Date()
+        await applyPreMutationDelay(for: request)
         let success = performInteraction(
             interaction,
             on: targetLookup.target,
@@ -799,6 +886,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             labelAlphabet: currentSettings.labelAlphabet,
             request: request
         )
+        await applyPostMutationDelay(for: request)
         let actionMs = Date().timeIntervalSince(startedAt) * 1_000
         let postStateStartedAt = Date()
         let postState = success
@@ -1235,12 +1323,14 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let strategy = request.string(for: "strategy")?.lowercased() ?? "return"
         let success: Bool
+        await applyPreMutationDelay(for: request)
         switch strategy {
         case "command_return", "cmd_return", "cmd-enter":
             success = postReturnKey(command: true)
         default:
             success = postReturnKey()
         }
+        await applyPostMutationDelay(for: request)
         return ActionResult(
             requestID: request.id,
             action: request.action,
@@ -1455,7 +1545,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
 
         let direction = request.string(for: "direction") ?? "down"
         let amount = request.int(for: "amount") ?? 3
+        await applyPreMutationDelay(for: request)
         let success = scrollController.step(direction: direction, amount: amount, snapshot: snapshot)
+        await applyPostMutationDelay(for: request)
 
         return ActionResult(
             requestID: request.id,
@@ -1646,11 +1738,13 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         let requestedWindowID = request.int(for: "windowID")
         let requestedTitle = request.string(for: "title") ?? request.string(for: "query")
         let requestedPID = request.int(for: "pid").map(Int32.init)
+        await applyPreMutationDelay(for: request)
         let didFocus = windowController.focus(
             windowID: requestedWindowID,
             title: requestedTitle,
             pid: requestedPID
         )
+        await applyPostMutationDelay(for: request)
         return ActionResult(
             requestID: request.id,
             action: request.action,
@@ -1677,9 +1771,240 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         )
     }
 
+    private func mediaScreenshotResult(for request: ActionRequest) async -> ActionResult {
+        guard let path = request.string(for: "path"), path.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "media.screenshot requires a non-empty path."
+            )
+        }
+
+        let format = normalizedScreenshotFormat(from: request.string(for: "format"))
+        guard format == "png" || format == "jpg" else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "media.screenshot supports png and jpg formats."
+            )
+        }
+
+        guard let scope = mediaCaptureScope(from: request) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "Unable to resolve a screenshot scope for the requested app or window."
+            )
+        }
+
+        let result = await screenMediaController.screenshot(
+            ScreenshotCaptureRequest(
+                path: path,
+                format: format,
+                includeCursor: request.bool(for: "includeCursor") ?? false,
+                scope: scope
+            )
+        )
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: result.outcome,
+            message: result.message,
+            payload: result.payload
+        )
+    }
+
+    private func mediaRecordResult(for request: ActionRequest) async -> ActionResult {
+        let operation = (request.string(for: "operation") ?? request.string(for: "action") ?? "status").lowercased()
+
+        switch operation {
+        case "start":
+            guard let path = request.string(for: "path"), path.isEmpty == false else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .invalidRequest,
+                    message: "media.record start requires a path."
+                )
+            }
+            let sessionID = request.string(for: "sessionID") ?? UUID().uuidString
+            let codec = normalizedRecordingCodec(from: request.string(for: "codec"))
+            let fps = max(request.int(for: "fps") ?? 12, 1)
+            guard let scope = mediaCaptureScope(from: request) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "Unable to resolve a recording scope for the requested app or window."
+                )
+            }
+            let result = await screenMediaController.startRecording(
+                ScreenRecordingRequest(
+                    sessionID: sessionID,
+                    path: path,
+                    codec: codec,
+                    fps: fps,
+                    includeCursor: request.bool(for: "includeCursor") ?? false,
+                    maxDurationSeconds: request.int(for: "maxDurationSeconds"),
+                    scope: scope
+                )
+            )
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        case "stop":
+            let result = await screenMediaController.stopRecording(sessionID: request.string(for: "sessionID"))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        case "status":
+            let result = await screenMediaController.recordingStatus(sessionID: request.string(for: "sessionID"))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        default:
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "media.record supports start, stop, and status."
+            )
+        }
+    }
+
+    private func mediaStreamResult(for request: ActionRequest) async -> ActionResult {
+        let operation = (request.string(for: "operation") ?? request.string(for: "action") ?? "status").lowercased()
+
+        switch operation {
+        case "start":
+            let sessionID = request.string(for: "sessionID") ?? UUID().uuidString
+            let format = (request.string(for: "format") ?? "mjpeg").lowercased()
+            let fps = max(request.int(for: "fps") ?? 4, 1)
+            guard let scope = mediaCaptureScope(from: request) else {
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .notFound,
+                    message: "Unable to resolve a streaming scope for the requested app or window."
+                )
+            }
+            let result = await screenMediaController.startStream(
+                ScreenStreamRequest(
+                    sessionID: sessionID,
+                    format: format,
+                    endpoint: request.string(for: "endpoint"),
+                    fps: fps,
+                    includeCursor: request.bool(for: "includeCursor") ?? false,
+                    scope: scope
+                )
+            )
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        case "stop":
+            let result = await screenMediaController.stopStream(sessionID: request.string(for: "sessionID"))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        case "status":
+            let result = await screenMediaController.streamStatus(sessionID: request.string(for: "sessionID"))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: result.outcome,
+                message: result.message,
+                payload: result.payload
+            )
+        default:
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "media.stream supports start, stop, and status."
+            )
+        }
+    }
+
+    private func mediaCaptureScope(from request: ActionRequest) -> ScreenCaptureScope? {
+        if let windowID = request.int(for: "windowID") {
+            let window = windowController.visibleWindows(excluding: []).first { $0.id == windowID }
+            return ScreenCaptureScope(
+                windowID: windowID,
+                rect: window?.frame,
+                description: window.map { "window:\($0.appName)/\($0.title)" } ?? "window:\(windowID)"
+            )
+        }
+
+        let resolvedApplication = resolvePID(from: request)
+        if resolvedApplication.unresolvedApp != nil {
+            return nil
+        }
+
+        if let pid = resolvedApplication.pid {
+            let window = windowController.visibleWindows(excluding: []).first { $0.pid == pid }
+            if let window {
+                return ScreenCaptureScope(
+                    windowID: window.id,
+                    rect: window.frame,
+                    description: "app:\(window.appName)"
+                )
+            }
+            return ScreenCaptureScope(
+                windowID: nil,
+                rect: nil,
+                description: "app:\(resolvedApplication.appName ?? "\(pid)")"
+            )
+        }
+
+        return .fullScreen
+    }
+
+    private func normalizedScreenshotFormat(from value: String?) -> String {
+        switch (value ?? "png").lowercased() {
+        case "jpeg":
+            return "jpg"
+        default:
+            return (value ?? "png").lowercased()
+        }
+    }
+
+    private func normalizedRecordingCodec(from value: String?) -> String {
+        switch (value ?? "h264").lowercased() {
+        case "hevc", "raw":
+            return (value ?? "h264").lowercased()
+        default:
+            return "h264"
+        }
+    }
+
     private func musicVolumeResult(for request: ActionRequest) async -> ActionResult {
         if let value = request.int(for: "value") {
+            await applyPreMutationDelay(for: request)
             let result = await musicController.setVolume(value)
+            await applyPostMutationDelay(for: request)
             return ActionResult(
                 requestID: request.id,
                 action: request.action,
@@ -1712,7 +2037,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
     private func airPlayConnectResult(for request: ActionRequest) async -> ActionResult {
         let action = request.string(for: "action")?.lowercased()
         if action == "disconnect" {
+            await applyPreMutationDelay(for: request)
             let result = await airPlayController.disconnect()
+            await applyPostMutationDelay(for: request)
             return ActionResult(
                 requestID: request.id,
                 action: request.action,
@@ -1722,7 +2049,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         }
 
         if action == "menu" || action == "open_menu" || action == "chooser" {
+            await applyPreMutationDelay(for: request)
             let result = await airPlayController.openMenu()
+            await applyPostMutationDelay(for: request)
             return ActionResult(
                 requestID: request.id,
                 action: request.action,
@@ -1740,7 +2069,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             )
         }
 
+        await applyPreMutationDelay(for: request)
         let result = await airPlayController.connect(device: device)
+        await applyPostMutationDelay(for: request)
         return ActionResult(
             requestID: request.id,
             action: request.action,
@@ -1830,6 +2161,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         if let failure = targetResolution.failure {
             return failure
         }
+        await applyPreMutationDelay(for: request)
         if let targetLookup = targetResolution.targetLookup {
             let didFocus = performInteraction(
                 "press",
@@ -1846,7 +2178,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                     message: "Unable to focus the requested text target."
                 )
             }
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            await sleeper.sleep(milliseconds: 120)
         }
 
         guard let capture = focusedTextBridge.captureFocusedContext() else {
@@ -1871,6 +2203,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         }
 
         let submitResult = submit ? postReturnKey() : true
+        await applyPostMutationDelay(for: request)
         let postCapture = focusedTextBridge.captureFocusedContext()
         let expectationsSatisfied = textInsertExpectationsSatisfied(
             request: request,
@@ -1951,6 +2284,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return failure
         }
 
+        await applyPreMutationDelay(for: request)
         if let targetLookup = targetResolution.targetLookup {
             let didFocus = performInteraction(
                 "press",
@@ -1967,7 +2301,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                     message: "Unable to focus the requested text target."
                 )
             }
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            await sleeper.sleep(milliseconds: 120)
         }
 
         guard let capture = focusedTextBridge.captureFocusedContext() else {
@@ -2068,6 +2402,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
         return didSelect
         """
 
+        await applyPreMutationDelay(for: request)
         guard let result = try? await shellRunner.run(
             launchPath: "/usr/bin/osascript",
             arguments: ["-e", script],
@@ -2080,6 +2415,7 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                 message: "Unable to control the application menu."
             )
         }
+        await applyPostMutationDelay(for: request)
 
         let succeeded = result.terminationStatus == 0 &&
             result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
@@ -2223,6 +2559,578 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             message: "Processed \(events.count) text-mode event(s).",
             payload: .array(decisionPayloads)
         )
+    }
+
+    private func inputKeyComboResult(for request: ActionRequest) async -> ActionResult {
+        guard let descriptor = keyComboDescriptor(from: request) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Missing key combo."
+            )
+        }
+
+        guard let resolvedKey = KeyboardKeyResolver.resolve(descriptor.key) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Unsupported key '\(descriptor.key)'."
+            )
+        }
+
+        let modifiers = descriptor.modifiers.union(resolvedKey.implicitModifiers)
+        let events = keyPressEvents(for: resolvedKey, modifiers: modifiers)
+
+        await applyPreMutationDelay(for: request)
+        let success = keyboardPerformer.post(events: events)
+        await applyPostMutationDelay(for: request)
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Posted keyboard combo." : "Unable to post keyboard combo.",
+            payload: [
+                "key": .string(descriptor.key),
+                "modifiers": .array(modifiers.map(\.rawValue).sorted().map(JSONValue.string)),
+                "eventCount": .number(Double(events.count)),
+            ]
+        )
+    }
+
+    private func inputKeySequenceResult(for request: ActionRequest) async -> ActionResult {
+        let parsedSteps: [ParsedKeySequenceStep]
+        do {
+            parsedSteps = try parseKeySequenceSteps(from: request)
+        } catch let error as KeySequenceParsingError {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: error.message
+            )
+        } catch {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .failed,
+                message: error.localizedDescription
+            )
+        }
+
+        guard parsedSteps.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "No key sequence was provided."
+            )
+        }
+
+        await applyPreMutationDelay(for: request)
+        var success = true
+        var eventCount = 0
+        for step in parsedSteps {
+            if step.events.isEmpty == false {
+                success = keyboardPerformer.post(events: step.events)
+                eventCount += step.events.count
+                if success == false {
+                    break
+                }
+            }
+            if step.delayAfterMs > 0 {
+                await sleeper.sleep(milliseconds: step.delayAfterMs)
+            }
+        }
+        await applyPostMutationDelay(for: request)
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Posted keyboard sequence." : "Unable to post keyboard sequence.",
+            payload: [
+                "stepCount": .number(Double(parsedSteps.count)),
+                "eventCount": .number(Double(eventCount)),
+            ]
+        )
+    }
+
+    private func uiGestureResult(for request: ActionRequest) async -> ActionResult {
+        let preset = normalizedGesturePreset(from: request)
+        guard preset.isEmpty == false else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .invalidRequest,
+                message: "Missing gesture preset."
+            )
+        }
+
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if let unresolvedApp = resolvedApplication.unresolvedApp {
+            return unresolvedApplicationResult(for: request, app: unresolvedApp)
+        }
+
+        switch preset {
+        case "scroll_up":
+            return await scrollGestureResult(
+                for: request,
+                preset: preset,
+                direction: "up",
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings
+            )
+        case "scroll_down":
+            return await scrollGestureResult(
+                for: request,
+                preset: preset,
+                direction: "down",
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings
+            )
+        case "swipe_left", "swipe_right":
+            return await swipeGestureResult(
+                for: request,
+                preset: preset,
+                resolvedApplication: resolvedApplication,
+                currentSettings: currentSettings
+            )
+        default:
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .unsupported,
+                message: "Gesture preset '\(preset)' is not supported."
+            )
+        }
+    }
+
+    private func scrollGestureResult(
+        for request: ActionRequest,
+        preset: String,
+        direction: String,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings
+    ) async -> ActionResult {
+        let targetResolution = optionalUITargetResolution(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+
+        let snapshot = gestureSnapshot(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            labelAlphabet: currentSettings.labelAlphabet
+        )
+        guard let snapshot else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .permissionRequired,
+                message: "Unable to inspect scrollable targets for the requested gesture."
+            )
+        }
+
+        if let targetLookup = targetResolution.targetLookup {
+            scrollController.focus(targetID: targetLookup.target.id)
+        }
+
+        let distance = max(request.arguments["distance"]?.doubleValue ?? Double((request.int(for: "amount") ?? 3) * 120), 1)
+        let totalAmount = max(request.int(for: "amount") ?? Int((distance / 120).rounded(.awayFromZero)), 1)
+        let durationMs = max(request.int(for: "durationMs") ?? 0, 0)
+        let segmentCount = max(1, min(8, durationMs > 0 ? Int(ceil(Double(durationMs) / 120.0)) : 1))
+        let interSegmentDelay = segmentCount > 1 ? max(durationMs / segmentCount, 1) : 0
+
+        await applyPreMutationDelay(for: request)
+        var success = true
+        for index in 0..<segmentCount {
+            let amount = totalAmount / segmentCount + (index < (totalAmount % segmentCount) ? 1 : 0)
+            if amount > 0 {
+                success = scrollController.step(direction: direction, amount: amount, snapshot: snapshot) && success
+            }
+            if index < (segmentCount - 1), interSegmentDelay > 0 {
+                await sleeper.sleep(milliseconds: interSegmentDelay)
+            }
+        }
+        await applyPostMutationDelay(for: request)
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Performed \(preset) gesture." : "Unable to perform \(preset) gesture.",
+            payload: [
+                "preset": .string(preset),
+                "direction": .string(direction),
+                "distance": .number(distance),
+                "durationMs": .number(Double(durationMs)),
+                "amount": .number(Double(totalAmount)),
+                "segmentCount": .number(Double(segmentCount)),
+                "targetID": targetResolution.targetLookup.map { .string($0.target.id) } ?? .null,
+            ]
+        )
+    }
+
+    private func swipeGestureResult(
+        for request: ActionRequest,
+        preset: String,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings
+    ) async -> ActionResult {
+        let targetResolution = optionalUITargetResolution(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        if let failure = targetResolution.failure {
+            return failure
+        }
+
+        let snapshot = gestureSnapshot(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            labelAlphabet: currentSettings.labelAlphabet
+        )
+        guard let frame = gestureFrame(snapshot: snapshot, targetLookup: targetResolution.targetLookup) else {
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "Unable to determine where to perform the requested gesture."
+            )
+        }
+
+        let durationMs = max(request.int(for: "durationMs") ?? 180, 0)
+        let requestedDistance = max(request.arguments["distance"]?.doubleValue ?? min(frame.width * 0.35, 240), 24)
+        let availableDistance = max(min(requestedDistance, max(frame.width - 24, 24)), 24)
+        let margin = min(max(frame.width * 0.1, 12), 32)
+        let center = frame.center
+        let halfDistance = availableDistance / 2
+        let minimumX = frame.x + margin
+        let maximumX = frame.x + frame.width - margin
+        let startX: Double
+        let endX: Double
+
+        switch preset {
+        case "swipe_left":
+            startX = min(maximumX, center.x + halfDistance)
+            endX = max(minimumX, center.x - halfDistance)
+        default:
+            startX = max(minimumX, center.x - halfDistance)
+            endX = min(maximumX, center.x + halfDistance)
+        }
+
+        let steps = max(4, min(48, durationMs > 0 ? max(durationMs / 16, 4) : 8))
+        let start = CGPoint(x: startX, y: center.y)
+        let end = CGPoint(x: endX, y: center.y)
+
+        await applyPreMutationDelay(for: request)
+        let success = pointerPerformer.drag(from: start, to: end, steps: steps)
+        await applyPostMutationDelay(for: request)
+
+        return ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: success ? .success : .failed,
+            message: success ? "Performed \(preset) gesture." : "Unable to perform \(preset) gesture.",
+            payload: [
+                "preset": .string(preset),
+                "distance": .number(availableDistance),
+                "durationMs": .number(Double(durationMs)),
+                "targetID": targetResolution.targetLookup.map { .string($0.target.id) } ?? .null,
+            ]
+        )
+    }
+
+    private func gestureSnapshot(
+        for request: ActionRequest,
+        resolvedApplication: ResolvedTargetApplication,
+        labelAlphabet: String
+    ) -> TargetSnapshot? {
+        if let pid = resolvedApplication.pid {
+            return snapshotter.snapshotApplication(pid: pid, labelAlphabet: labelAlphabet)
+        }
+        return snapshotter.snapshotFrontmostApplication(labelAlphabet: labelAlphabet)
+    }
+
+    private func optionalUITargetResolution(
+        for request: ActionRequest,
+        resolvedApplication: ResolvedTargetApplication,
+        currentSettings: WizmacSettings
+    ) -> UITargetResolution {
+        let hasTargetID = request.string(for: "targetID")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let hasQuery = request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard hasTargetID || hasQuery else {
+            return UITargetResolution(targetLookup: nil, failure: nil)
+        }
+
+        return resolveUITarget(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+    }
+
+    private func gestureFrame(snapshot: TargetSnapshot?, targetLookup: UITargetLookupResult?) -> TargetRect? {
+        if let frame = targetLookup?.target.frame {
+            return frame
+        }
+
+        if let snapshot {
+            if let frame = scrollController.scrollTargets(from: snapshot).first?.frame {
+                return frame
+            }
+
+            return snapshot.targets
+                .compactMap(\.frame)
+                .max { lhs, rhs in
+                    (lhs.width * lhs.height) < (rhs.width * rhs.height)
+                }
+        }
+
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            return nil
+        }
+        return TargetRect(visibleFrame)
+    }
+
+    private func normalizedGesturePreset(from request: ActionRequest) -> String {
+        (request.string(for: "preset") ?? request.string(for: "gesture") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+    }
+
+    private func keyComboDescriptor(from request: ActionRequest) -> (key: String, modifiers: Set<TextKeyModifier>)? {
+        if let key = request.string(for: "key")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           key.isEmpty == false {
+            return (key, parsedModifiers(from: request.arguments["modifiers"]))
+        }
+
+        if let combo = request.string(for: "combo") ?? request.string(for: "shortcut") {
+            return parseComboString(combo)
+        }
+
+        return nil
+    }
+
+    private func keyPressEvents(
+        for resolvedKey: KeyboardResolvedKey,
+        modifiers: Set<TextKeyModifier>
+    ) -> [SynthesizedKeyEvent] {
+        [
+            SynthesizedKeyEvent(
+                kind: .keyDown,
+                keyCode: resolvedKey.keyCode,
+                characters: resolvedKey.characters,
+                modifiers: modifiers
+            ),
+            SynthesizedKeyEvent(
+                kind: .keyUp,
+                keyCode: resolvedKey.keyCode,
+                characters: resolvedKey.characters,
+                modifiers: modifiers
+            ),
+        ]
+    }
+
+    private func parsedModifiers(from value: JSONValue?) -> Set<TextKeyModifier> {
+        switch value {
+        case let .array(items):
+            return Set(items.compactMap { item in
+                item.stringValue.flatMap(parsedModifier(from:))
+            })
+        case let .string(raw):
+            let tokens = raw
+                .split(whereSeparator: { $0 == "+" || $0 == "," || $0 == " " })
+                .map(String.init)
+            return Set(tokens.compactMap(parsedModifier(from:)))
+        default:
+            return []
+        }
+    }
+
+    private func parsedModifier(from raw: String) -> TextKeyModifier? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "control", "ctrl":
+            return .control
+        case "option", "opt", "alt":
+            return .option
+        case "shift":
+            return .shift
+        case "command", "cmd":
+            return .command
+        case "function", "fn":
+            return .function
+        default:
+            return nil
+        }
+    }
+
+    private func parseComboString(_ raw: String) -> (key: String, modifiers: Set<TextKeyModifier>)? {
+        let components = raw
+            .split(separator: "+")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+        guard let key = components.last else { return nil }
+
+        let modifierTokens = components.dropLast()
+        let modifiers = modifierTokens.compactMap(parsedModifier(from:))
+        guard modifiers.count == modifierTokens.count else {
+            return nil
+        }
+
+        return (key, Set(modifiers))
+    }
+
+    private enum KeySequenceParsingError: Error {
+        case invalid(String)
+
+        var message: String {
+            switch self {
+            case let .invalid(message):
+                return message
+            }
+        }
+    }
+
+    private func parseKeySequenceSteps(from request: ActionRequest) throws -> [ParsedKeySequenceStep] {
+        if let items = request.array(for: "sequence") ?? request.array(for: "events") {
+            return try items.map(parseKeySequenceStep(from:))
+        }
+
+        if let raw = request.string(for: "keys") ?? request.string(for: "sequence"),
+           raw.isEmpty == false {
+            return try keySequenceTokens(from: raw).map { token in
+                try parseKeySequenceStep(from: .string(token))
+            }
+        }
+
+        throw KeySequenceParsingError.invalid("No key sequence was provided.")
+    }
+
+    private func parseKeySequenceStep(from value: JSONValue) throws -> ParsedKeySequenceStep {
+        switch value {
+        case let .string(raw):
+            if let combo = parseComboString(raw) {
+                return try parsedKeySequenceStep(
+                    key: combo.key,
+                    modifiers: combo.modifiers,
+                    kind: "press",
+                    delayAfterMs: 0
+                )
+            }
+            return try parsedKeySequenceStep(
+                key: raw,
+                modifiers: [],
+                kind: "press",
+                delayAfterMs: 0
+            )
+        case let .object(object):
+            let delayAfterMs = max(object["delayMs"]?.intValue ?? 0, 0)
+            if let combo = object["combo"]?.stringValue {
+                guard let parsedCombo = parseComboString(combo) else {
+                    throw KeySequenceParsingError.invalid("Unsupported combo '\(combo)'.")
+                }
+                return try parsedKeySequenceStep(
+                    key: parsedCombo.key,
+                    modifiers: parsedCombo.modifiers,
+                    kind: object["kind"]?.stringValue ?? "press",
+                    delayAfterMs: delayAfterMs
+                )
+            }
+
+            if object["key"] == nil, object["token"] == nil, delayAfterMs > 0 {
+                return ParsedKeySequenceStep(events: [], delayAfterMs: delayAfterMs)
+            }
+
+            guard let key = object["key"]?.stringValue ?? object["token"]?.stringValue else {
+                throw KeySequenceParsingError.invalid("Each key sequence step must include a key or combo.")
+            }
+
+            return try parsedKeySequenceStep(
+                key: key,
+                modifiers: parsedModifiers(from: object["modifiers"]),
+                kind: object["kind"]?.stringValue ?? "press",
+                delayAfterMs: delayAfterMs
+            )
+        default:
+            throw KeySequenceParsingError.invalid("Unsupported key sequence step.")
+        }
+    }
+
+    private func parsedKeySequenceStep(
+        key: String,
+        modifiers: Set<TextKeyModifier>,
+        kind: String,
+        delayAfterMs: Int
+    ) throws -> ParsedKeySequenceStep {
+        guard let resolvedKey = KeyboardKeyResolver.resolve(key) else {
+            throw KeySequenceParsingError.invalid("Unsupported key '\(key)'.")
+        }
+
+        let combinedModifiers = modifiers.union(resolvedKey.implicitModifiers)
+        let normalizedKind = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let events: [SynthesizedKeyEvent]
+
+        switch normalizedKind {
+        case "down", "keydown", "key_down":
+            events = [
+                SynthesizedKeyEvent(
+                    kind: .keyDown,
+                    keyCode: resolvedKey.keyCode,
+                    characters: resolvedKey.characters,
+                    modifiers: combinedModifiers
+                ),
+            ]
+        case "up", "keyup", "key_up":
+            events = [
+                SynthesizedKeyEvent(
+                    kind: .keyUp,
+                    keyCode: resolvedKey.keyCode,
+                    characters: resolvedKey.characters,
+                    modifiers: combinedModifiers
+                ),
+            ]
+        case "press", "tap":
+            events = keyPressEvents(for: resolvedKey, modifiers: combinedModifiers)
+        default:
+            throw KeySequenceParsingError.invalid("Unsupported key sequence event kind '\(kind)'.")
+        }
+
+        return ParsedKeySequenceStep(events: events, delayAfterMs: delayAfterMs)
+    }
+
+    private func keySequenceTokens(from raw: String) throws -> [String] {
+        var tokens: [String] = []
+        var index = raw.startIndex
+
+        while index < raw.endIndex {
+            if raw[index] == "<" {
+                guard let close = raw[index...].firstIndex(of: ">") else {
+                    throw KeySequenceParsingError.invalid("Unterminated key token in sequence.")
+                }
+                let token = String(raw[raw.index(after: index)..<close])
+                if token.isEmpty == false {
+                    tokens.append(token)
+                }
+                index = raw.index(after: close)
+            } else {
+                tokens.append(String(raw[index]))
+                index = raw.index(after: index)
+            }
+        }
+
+        return tokens
     }
 
     private func performInteraction(
@@ -3239,6 +4147,12 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return .uiSubmit
         case "choose_file", "choosefile":
             return .uiChooseFile
+        case "gesture":
+            return .uiGesture
+        case "key_combo", "keycombo":
+            return .inputKeyCombo
+        case "key_sequence", "keysequence":
+            return .inputKeySequence
         default:
             return nil
         }

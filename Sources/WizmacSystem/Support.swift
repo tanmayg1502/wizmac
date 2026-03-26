@@ -10,6 +10,17 @@ struct CommandResult {
     var terminationStatus: Int32
 }
 
+protocol AutomationSleeping {
+    func sleep(milliseconds: Int) async
+}
+
+struct TaskAutomationSleeper: AutomationSleeping {
+    func sleep(milliseconds: Int) async {
+        guard milliseconds > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+    }
+}
+
 protocol ShellRunning: Sendable {
     func run(
         launchPath: String,
@@ -79,6 +90,62 @@ protocol PointerAutomationPerforming {
     func move(to point: CGPoint) -> Bool
     func click(at point: CGPoint, clickState: Int64, button: CGMouseButton) -> Bool
     func drag(from start: CGPoint, to end: CGPoint, steps: Int) -> Bool
+}
+
+struct SynthesizedKeyEvent: Sendable, Equatable {
+    enum Kind: String, Sendable, Equatable {
+        case keyDown
+        case keyUp
+    }
+
+    var kind: Kind
+    var keyCode: CGKeyCode
+    var characters: String
+    var modifiers: Set<TextKeyModifier>
+
+    init(
+        kind: Kind,
+        keyCode: CGKeyCode,
+        characters: String = "",
+        modifiers: Set<TextKeyModifier> = []
+    ) {
+        self.kind = kind
+        self.keyCode = keyCode
+        self.characters = characters
+        self.modifiers = modifiers
+    }
+}
+
+protocol KeyboardAutomationPerforming {
+    @discardableResult
+    func post(events: [SynthesizedKeyEvent]) -> Bool
+}
+
+struct CGKeyboardAutomationPerformer: KeyboardAutomationPerforming {
+    @discardableResult
+    func post(events: [SynthesizedKeyEvent]) -> Bool {
+        for event in events {
+            guard let cgEvent = CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: event.keyCode,
+                keyDown: event.kind == .keyDown
+            ) else {
+                return false
+            }
+
+            cgEvent.flags = event.modifiers.cgEventFlags
+            if event.characters.isEmpty == false {
+                let unicodeScalars = Array(event.characters.utf16)
+                cgEvent.keyboardSetUnicodeString(
+                    stringLength: unicodeScalars.count,
+                    unicodeString: unicodeScalars
+                )
+            }
+            cgEvent.post(tap: .cghidEventTap)
+        }
+
+        return true
+    }
 }
 
 struct CGPointerAutomationPerformer: PointerAutomationPerforming {
@@ -663,6 +730,153 @@ public enum GlobalInputTranslator {
             return .space
         default:
             return nil
+        }
+    }
+}
+
+extension Set where Element == TextKeyModifier {
+    var cgEventFlags: CGEventFlags {
+        var flags: CGEventFlags = []
+        if contains(.control) { flags.insert(.maskControl) }
+        if contains(.option) { flags.insert(.maskAlternate) }
+        if contains(.shift) { flags.insert(.maskShift) }
+        if contains(.command) { flags.insert(.maskCommand) }
+        if contains(.function) { flags.insert(.maskSecondaryFn) }
+        return flags
+    }
+}
+
+struct KeyboardResolvedKey: Sendable, Equatable {
+    var keyCode: CGKeyCode
+    var characters: String
+    var implicitModifiers: Set<TextKeyModifier>
+}
+
+enum KeyboardKeyResolver {
+    private static let baseKeyCodes: [String: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+        "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+        "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
+        "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29,
+        "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37,
+        "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44,
+        "n": 45, "m": 46, ".": 47, "`": 50
+    ]
+
+    private static let shiftedCharacters: [String: (String, CGKeyCode)] = [
+        "!": ("!", 18), "@": ("@", 19), "#": ("#", 20), "$": ("$", 21),
+        "^": ("^", 22), "%": ("%", 23), "+": ("+", 24), "(": ("(", 25),
+        "&": ("&", 26), "_": ("_", 27), "*": ("*", 28), ")": (")", 29),
+        "}": ("}", 30), "{": ("{", 33), ":": (":", 41), "\"": ("\"", 39),
+        "|": ("|", 42), "<": ("<", 43), "?": ("?", 44), ">": (">", 47),
+        "~": ("~", 50)
+    ]
+
+    private static let namedKeys: [String: KeyboardResolvedKey] = [
+        "return": KeyboardResolvedKey(keyCode: 36, characters: "\r", implicitModifiers: []),
+        "enter": KeyboardResolvedKey(keyCode: 36, characters: "\r", implicitModifiers: []),
+        "tab": KeyboardResolvedKey(keyCode: 48, characters: "\t", implicitModifiers: []),
+        "space": KeyboardResolvedKey(keyCode: 49, characters: " ", implicitModifiers: []),
+        "backspace": KeyboardResolvedKey(keyCode: 51, characters: "\u{8}", implicitModifiers: []),
+        "delete": KeyboardResolvedKey(keyCode: 51, characters: "\u{8}", implicitModifiers: []),
+        "escape": KeyboardResolvedKey(keyCode: 53, characters: "\u{1b}", implicitModifiers: []),
+        "esc": KeyboardResolvedKey(keyCode: 53, characters: "\u{1b}", implicitModifiers: []),
+        "command": KeyboardResolvedKey(keyCode: 55, characters: "", implicitModifiers: []),
+        "cmd": KeyboardResolvedKey(keyCode: 55, characters: "", implicitModifiers: []),
+        "shift": KeyboardResolvedKey(keyCode: 56, characters: "", implicitModifiers: []),
+        "option": KeyboardResolvedKey(keyCode: 58, characters: "", implicitModifiers: []),
+        "alt": KeyboardResolvedKey(keyCode: 58, characters: "", implicitModifiers: []),
+        "control": KeyboardResolvedKey(keyCode: 59, characters: "", implicitModifiers: []),
+        "ctrl": KeyboardResolvedKey(keyCode: 59, characters: "", implicitModifiers: []),
+        "function": KeyboardResolvedKey(keyCode: 63, characters: "", implicitModifiers: []),
+        "fn": KeyboardResolvedKey(keyCode: 63, characters: "", implicitModifiers: []),
+        "home": KeyboardResolvedKey(keyCode: 115, characters: "", implicitModifiers: []),
+        "pageup": KeyboardResolvedKey(keyCode: 116, characters: "", implicitModifiers: []),
+        "forwarddelete": KeyboardResolvedKey(keyCode: 117, characters: "", implicitModifiers: []),
+        "deleteforward": KeyboardResolvedKey(keyCode: 117, characters: "", implicitModifiers: []),
+        "end": KeyboardResolvedKey(keyCode: 119, characters: "", implicitModifiers: []),
+        "pagedown": KeyboardResolvedKey(keyCode: 121, characters: "", implicitModifiers: []),
+        "left": KeyboardResolvedKey(keyCode: 123, characters: "", implicitModifiers: []),
+        "leftarrow": KeyboardResolvedKey(keyCode: 123, characters: "", implicitModifiers: []),
+        "right": KeyboardResolvedKey(keyCode: 124, characters: "", implicitModifiers: []),
+        "rightarrow": KeyboardResolvedKey(keyCode: 124, characters: "", implicitModifiers: []),
+        "down": KeyboardResolvedKey(keyCode: 125, characters: "", implicitModifiers: []),
+        "downarrow": KeyboardResolvedKey(keyCode: 125, characters: "", implicitModifiers: []),
+        "up": KeyboardResolvedKey(keyCode: 126, characters: "", implicitModifiers: []),
+        "uparrow": KeyboardResolvedKey(keyCode: 126, characters: "", implicitModifiers: [])
+    ]
+
+    static func resolve(_ rawKey: String) -> KeyboardResolvedKey? {
+        let trimmed = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+
+        let normalized = trimmed
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+
+        if let named = namedKeys[normalized] {
+            return named
+        }
+
+        if trimmed.count == 1, let scalar = trimmed.unicodeScalars.first {
+            let character = String(scalar)
+            if let shifted = shiftedCharacters[character] {
+                return KeyboardResolvedKey(
+                    keyCode: shifted.1,
+                    characters: shifted.0,
+                    implicitModifiers: [.shift]
+                )
+            }
+
+            let lowered = character.lowercased()
+            if let keyCode = baseKeyCodes[lowered] {
+                var modifiers: Set<TextKeyModifier> = []
+                if character != lowered {
+                    modifiers.insert(.shift)
+                }
+                return KeyboardResolvedKey(
+                    keyCode: keyCode,
+                    characters: character,
+                    implicitModifiers: modifiers
+                )
+            }
+        }
+
+        if normalized.count >= 2,
+           normalized.first == "f",
+           let number = Int(normalized.dropFirst()),
+           let keyCode = functionKeyCode(for: number) {
+            return KeyboardResolvedKey(keyCode: keyCode, characters: "", implicitModifiers: [])
+        }
+
+        return nil
+    }
+
+    private static func functionKeyCode(for number: Int) -> CGKeyCode? {
+        switch number {
+        case 1: return 122
+        case 2: return 120
+        case 3: return 99
+        case 4: return 118
+        case 5: return 96
+        case 6: return 97
+        case 7: return 98
+        case 8: return 100
+        case 9: return 101
+        case 10: return 109
+        case 11: return 103
+        case 12: return 111
+        case 13: return 105
+        case 14: return 107
+        case 15: return 113
+        case 16: return 106
+        case 17: return 64
+        case 18: return 79
+        case 19: return 80
+        case 20: return 90
+        default: return nil
         }
     }
 }

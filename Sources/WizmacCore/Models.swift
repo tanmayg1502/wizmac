@@ -22,6 +22,9 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case uiExecute = "ui.execute"
     case uiHints = "ui.hints"
     case uiDrag = "ui.drag"
+    case inputKeyCombo = "input.key_combo"
+    case inputKeySequence = "input.key_sequence"
+    case uiGesture = "ui.gesture"
     case uiSessionEnd = "ui.session_end"
     case scrollTargets = "scroll.targets"
     case scrollFocus = "scroll.focus"
@@ -43,6 +46,9 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case textMode = "text.mode"
     case textStatus = "text.status"
     case menuSelect = "menu.select"
+    case mediaScreenshot = "media.screenshot"
+    case mediaRecord = "media.record"
+    case mediaStream = "media.stream"
     case mediaMusicVolume = "media.music_volume"
     case displayAirPlayDevices = "display.airplay_devices"
     case displayAirPlayConnect = "display.airplay_connect"
@@ -541,6 +547,8 @@ public extension ActionName {
         .systemConfirmationStatus,
         .systemTrustedSessionStart,
         .systemTrustedSessionEnd,
+        .mediaRecord,
+        .mediaStream,
         .displayAirPlayDevices,
         .remoteClients,
         .textMode,
@@ -556,6 +564,9 @@ public extension ActionName {
         .uiSubmit,
         .uiChooseFile,
         .uiDrag,
+        .inputKeyCombo,
+        .inputKeySequence,
+        .uiGesture,
         .menuSelect,
         .windowFocus,
         .windowExclude,
@@ -563,6 +574,7 @@ public extension ActionName {
         .textDetach,
         .textInsert,
         .textSendKeys,
+        .mediaScreenshot,
         .scrollTo,
         .scrollUntil,
         .scrollIntoView,

@@ -14,6 +14,17 @@ final class CoreDefaultsTests: XCTestCase {
         XCTAssertTrue(settings.gridFallbackEnabled)
     }
 
+    func testPhaseOneInputActionsStayRiskyAndTrustEligible() {
+        let settings = WizmacSettings()
+
+        for action in [ActionName.inputKeyCombo, .inputKeySequence, .uiGesture] {
+            XCTAssertTrue(settings.riskyActions.contains(action))
+            XCTAssertFalse(settings.autoApprovedActions.contains(action))
+            XCTAssertTrue(TrustedAutomationPolicy.defaultAllowedActions.contains(action))
+            XCTAssertTrue(TrustedAutomationPolicy.trustedBatchAllowedActions.contains(action))
+        }
+    }
+
     func testServiceSnapshotDefaultsKeepSessionStateDisabledOrInactive() {
         let snapshot = WizmacServiceSnapshot(
             health: ServiceHealth(status: .running),

@@ -8,6 +8,7 @@ APP_NAME="${WIZMAC_BENCH_APP:-}"
 TARGET_ID="${WIZMAC_BENCH_TARGET_ID:-}"
 TEXT_PAYLOAD="${WIZMAC_BENCH_TEXT:-hello from wizmac}"
 ITERATIONS="${WIZMAC_BENCH_ITERATIONS:-3}"
+RUN_PREFETCH="${WIZMAC_BENCH_PREFETCH:-1}"
 
 if [[ ! -x "$BIN_PATH" ]]; then
   echo "error: wizmac binary not found at $BIN_PATH" >&2
@@ -31,6 +32,14 @@ if [[ -n "$APP_NAME" ]]; then
   search_args+=("app=$APP_NAME")
 fi
 
+if [[ "$RUN_PREFETCH" == "1" ]]; then
+  prefetch_args=("ui.prefetch")
+  if [[ -n "$APP_NAME" ]]; then
+    prefetch_args+=("app=$APP_NAME")
+  fi
+  measure "ui.prefetch" "${prefetch_args[@]}"
+fi
+
 measure "ui.search" "${search_args[@]}"
 
 if [[ -n "$TARGET_ID" ]]; then
@@ -41,7 +50,7 @@ if [[ -n "$TARGET_ID" ]]; then
   measure "ui.act" "${act_args[@]}"
 fi
 
-measure "text.insert" "text.insert" "text=$TEXT_PAYLOAD" "debugTimings=true"
+measure "text.insert" "text=$TEXT_PAYLOAD" "debugTimings=true"
 
 echo ""
 echo "Benchmark complete."

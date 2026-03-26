@@ -45,6 +45,16 @@ Good first stop for:
 - source/origin behavior
 - auto-trust dispatch rules
 - local vs remote source semantics
+- schema checks for `input.key_combo`, `input.key_sequence`, `ui.gesture`, `batch.run`, `wait.*`, and `media.*`
+
+### `RoadmapSurfaceTests`
+
+Use these for the roadmap-specific control-plane surface checks:
+
+- phase-1 timing args and timeout exposure
+- batch DSL schema shape
+- wait tool registration
+- media tool registration
 
 ### `CLITimingTests`
 
@@ -55,6 +65,8 @@ These tests validate:
 - namespaced CLI syntax
 - JSON-RPC CLI syntax
 - latency sampling through a fixture-backed control plane
+- parser and transport parity for timing-oriented arguments on the road map surfaces
+- key-command ergonomics for `wizmac key combo`, `wizmac key sequence`, and `wizmac key type`
 
 These tests do not require real UI automation because they inject a fixture router through the `WIZMAC_CONTROL_PLANE_FIXTURE` environment variable.
 
@@ -157,6 +169,8 @@ WIZMAC_BENCH_TARGET_ID=button-1 scripts/benchmark_wizmac_latency.sh
 
 - `swift test --filter WizmacControlPlaneTests`
 - a manual CLI smoke test with `swift run wizmac`
+- `swift test --filter RoadmapSurfaceTests`
+- `swift test --filter CLITimingTests`
 
 ### If you changed executor behavior
 
