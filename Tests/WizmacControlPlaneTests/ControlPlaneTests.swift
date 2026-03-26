@@ -43,8 +43,51 @@ final class ControlPlaneTests: XCTestCase {
 
         let tools = try XCTUnwrap(response?.result?["tools"]?.arrayValue)
         XCTAssertFalse(tools.isEmpty)
-        XCTAssertEqual(tools.first?["name"]?.stringValue, "display.airplay_connect")
+        XCTAssertEqual(tools.first?["name"]?.stringValue, "batch.run")
+        XCTAssertTrue(tools.contains { $0["name"]?.stringValue == "input.key_combo" })
+        XCTAssertTrue(tools.contains { $0["name"]?.stringValue == "input.key_sequence" })
+        XCTAssertTrue(tools.contains { $0["name"]?.stringValue == "ui.gesture" })
         XCTAssertTrue(tools.contains { $0["name"]?.stringValue == "system.permissions_request" })
+    }
+
+    func testInitializeNegotiatesSupportedProtocolVersionAndCapabilities() async throws {
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: UnconfiguredControlPlaneRouter())
+        let response = await dispatcher.handleJSONRPC(
+            JSONRPCRequest(
+                id: .string("init"),
+                method: "initialize",
+                params: .object([
+                    "protocolVersion": .string("2025-11-25"),
+                    "capabilities": .object([:]),
+                    "clientInfo": .object([
+                        "name": .string("Test Client"),
+                    ]),
+                ])
+            ),
+            source: ControlPlaneSource(kind: .mcp)
+        )
+
+        XCTAssertEqual(response?.result?["protocolVersion"]?.stringValue, "2025-11-25")
+        XCTAssertEqual(response?.result?["serverInfo"]?["name"]?.stringValue, "wizmac")
+        XCTAssertEqual(response?.result?["capabilities"]?["tools"]?.objectValue?.count, 0)
+        XCTAssertEqual(response?.result?["capabilities"]?["resources"]?.objectValue?.count, 0)
+        XCTAssertNotNil(response?.result?["instructions"]?.stringValue)
+    }
+
+    func testInitializeFallsBackToLatestSupportedProtocolVersion() async throws {
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: UnconfiguredControlPlaneRouter())
+        let response = await dispatcher.handleJSONRPC(
+            JSONRPCRequest(
+                id: .string("init"),
+                method: "initialize",
+                params: .object([
+                    "protocolVersion": .string("2099-01-01"),
+                ])
+            ),
+            source: ControlPlaneSource(kind: .mcp)
+        )
+
+        XCTAssertEqual(response?.result?["protocolVersion"]?.stringValue, "2025-11-25")
     }
 
     func testUIActAndUICopySchemasExposeQueryBasedResolution() throws {
@@ -82,6 +125,63 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(menuSelectProperties["path"]?.stringValue, "string")
         XCTAssertEqual(textInsertProperties["expectText"]?.stringValue, "string")
         XCTAssertEqual(textInsertProperties["expectSent"]?.stringValue, "boolean")
+    }
+
+    func testPhase1ErgonomicToolSchemasExposeCanonicalArgumentsAndTimingControls() throws {
+        let inputKeyCombo = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "input.key_combo"))
+        let inputKeySequence = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "input.key_sequence"))
+        let uiGesture = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "ui.gesture"))
+        let uiAct = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "ui.act"))
+        let textSendKeys = try XCTUnwrap(ControlPlaneToolRegistry.default.tool(named: "text.send_keys"))
+
+        let comboProperties = try XCTUnwrap(inputKeyCombo.inputSchema.objectValue?["properties"]?.objectValue)
+        let sequenceProperties = try XCTUnwrap(inputKeySequence.inputSchema.objectValue?["properties"]?.objectValue)
+        let gestureProperties = try XCTUnwrap(uiGesture.inputSchema.objectValue?["properties"]?.objectValue)
+        let actProperties = try XCTUnwrap(uiAct.inputSchema.objectValue?["properties"]?.objectValue)
+        let sendKeysProperties = try XCTUnwrap(textSendKeys.inputSchema.objectValue?["properties"]?.objectValue)
+
+        XCTAssertEqual(comboProperties["mods"]?.stringValue, "array")
+        XCTAssertEqual(comboProperties["modifiers"]?.stringValue, "array")
+        XCTAssertEqual(comboProperties["key"]?.stringValue, "string")
+        XCTAssertEqual(comboProperties["app"]?.stringValue, "string")
+        XCTAssertEqual(comboProperties["pid"]?.stringValue, "number")
+        XCTAssertEqual(comboProperties["activate"]?.stringValue, "boolean")
+        XCTAssertEqual(comboProperties["launchIfNeeded"]?.stringValue, "boolean")
+        XCTAssertEqual(comboProperties["autoTrust"]?.stringValue, "boolean")
+        XCTAssertEqual(comboProperties["trustedSessionID"]?.stringValue, "string")
+        XCTAssertEqual(comboProperties["preDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(comboProperties["postDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(comboProperties["debugTimings"]?.stringValue, "boolean")
+
+        XCTAssertEqual(sequenceProperties["sequence"]?.stringValue, "string")
+        XCTAssertEqual(sequenceProperties["steps"]?.stringValue, "array")
+        XCTAssertEqual(sequenceProperties["app"]?.stringValue, "string")
+        XCTAssertEqual(sequenceProperties["pid"]?.stringValue, "number")
+        XCTAssertEqual(sequenceProperties["activate"]?.stringValue, "boolean")
+        XCTAssertEqual(sequenceProperties["launchIfNeeded"]?.stringValue, "boolean")
+        XCTAssertEqual(sequenceProperties["autoTrust"]?.stringValue, "boolean")
+        XCTAssertEqual(sequenceProperties["trustedSessionID"]?.stringValue, "string")
+        XCTAssertEqual(sequenceProperties["preDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(sequenceProperties["postDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(sequenceProperties["debugTimings"]?.stringValue, "boolean")
+
+        XCTAssertEqual(gestureProperties["preset"]?.stringValue, "string")
+        XCTAssertEqual(gestureProperties["targetID"]?.stringValue, "string")
+        XCTAssertEqual(gestureProperties["query"]?.stringValue, "string")
+        XCTAssertEqual(gestureProperties["app"]?.stringValue, "string")
+        XCTAssertEqual(gestureProperties["pid"]?.stringValue, "number")
+        XCTAssertEqual(gestureProperties["distance"]?.stringValue, "number")
+        XCTAssertEqual(gestureProperties["durationMs"]?.stringValue, "number")
+        XCTAssertEqual(gestureProperties["preDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(gestureProperties["postDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(gestureProperties["autoTrust"]?.stringValue, "boolean")
+        XCTAssertEqual(gestureProperties["trustedSessionID"]?.stringValue, "string")
+        XCTAssertEqual(gestureProperties["debugTimings"]?.stringValue, "boolean")
+
+        XCTAssertEqual(actProperties["preDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(actProperties["postDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(sendKeysProperties["preDelayMs"]?.stringValue, "number")
+        XCTAssertEqual(sendKeysProperties["postDelayMs"]?.stringValue, "number")
     }
 
     func testDispatcherCallsSharedRouter() async throws {
@@ -202,7 +302,10 @@ final class ControlPlaneTests: XCTestCase {
     }
 
     func testHTTPSourceResolverTrustsForwardedHeadersForLocalService() throws {
-        let resolver = HTTPControlPlaneSourceResolver(trustForwardedSourceHeaders: true)
+        let resolver = HTTPControlPlaneSourceResolver(
+            trustForwardedSourceHeaders: true,
+            defaultLocalSourceKind: .http
+        )
         let rpcRequest = JSONRPCRequest(
             id: .string("1"),
             method: "tools/call",
@@ -240,7 +343,10 @@ final class ControlPlaneTests: XCTestCase {
     }
 
     func testHTTPSourceResolverForAuthenticatedRemoteRequestsStaysHTTP() throws {
-        let resolver = HTTPControlPlaneSourceResolver(trustForwardedSourceHeaders: false)
+        let resolver = HTTPControlPlaneSourceResolver(
+            trustForwardedSourceHeaders: false,
+            defaultLocalSourceKind: .http
+        )
         let rpcRequest = JSONRPCRequest(
             id: .string("1"),
             method: "tools/call",

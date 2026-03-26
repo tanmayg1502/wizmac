@@ -118,12 +118,28 @@ public final class HTTPJSONRPCServer: @unchecked Sendable {
             return HTTPResponse.badRequest(body: #"{"error":"invalid_request"}"#).data
         }
 
+        let isMCPEndpoint = request.path == "/mcp"
+        let matchesConfiguredPath = request.path == configuration.path
+
+        guard matchesConfiguredPath || isMCPEndpoint else {
+            return HTTPResponse.notFound.data
+        }
+
+        if isMCPEndpoint, request.method == "GET" {
+            return HTTPResponse.mcpGetNotSupported.data
+        }
+
         guard request.method == "POST" else {
             return HTTPResponse.methodNotAllowed.data
         }
 
-        guard request.path == configuration.path || request.path == "/mcp" else {
-            return HTTPResponse.notFound.data
+        if isMCPEndpoint {
+            guard MCPProtocol.supportsVersionHeader(request.headers["mcp-protocol-version"]) else {
+                return HTTPResponse.badRequest(body: #"{"error":"unsupported_protocol_version"}"#).data
+            }
+            guard request.originHeaderIsAllowed(allowedHost: configuration.host.debugDescription) else {
+                return HTTPResponse.forbidden(body: #"{"error":"forbidden_origin"}"#).data
+            }
         }
 
         if configuration.allowedRemoteIdentities.isEmpty == false {
@@ -133,16 +149,26 @@ public final class HTTPJSONRPCServer: @unchecked Sendable {
         }
 
         let rpcResponse: JSONRPCResponse
+        var rpcRequest: JSONRPCRequest?
         do {
-            let rpcRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: request.body)
+            let decodedRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: request.body)
+            rpcRequest = decodedRequest
             let source = HTTPControlPlaneSourceResolver(
-                trustForwardedSourceHeaders: trustsForwardedSourceHeaders
+                trustForwardedSourceHeaders: trustsForwardedSourceHeaders,
+                defaultLocalSourceKind: isMCPEndpoint ? .mcp : .http
             )
-            .resolve(request: request, rpcRequest: rpcRequest)
-            rpcResponse = await dispatcher.handleJSONRPC(rpcRequest, source: source)
-                ?? JSONRPCResponse(id: rpcRequest.id, result: .object([:]))
+            .resolve(request: request, rpcRequest: decodedRequest)
+            if let handled = await dispatcher.handleJSONRPC(decodedRequest, source: source) {
+                rpcResponse = handled
+            } else {
+                return HTTPResponse.accepted.data
+            }
         } catch {
             rpcResponse = JSONRPCResponse(id: nil, error: JSONRPCStandardError.parseError)
+        }
+
+        if rpcRequest?.id == nil {
+            return HTTPResponse.accepted.data
         }
 
         let encoder = JSONEncoder()
@@ -200,6 +226,7 @@ public final class HTTPJSONRPCServer: @unchecked Sendable {
 
 struct HTTPControlPlaneSourceResolver: Sendable {
     let trustForwardedSourceHeaders: Bool
+    let defaultLocalSourceKind: ControlPlaneSourceKind
 
     func resolve(request: HTTPRequest, rpcRequest: JSONRPCRequest) -> ControlPlaneSource {
         let headerClientID = request.headers["x-client-id"]
@@ -212,7 +239,7 @@ struct HTTPControlPlaneSourceResolver: Sendable {
             let headerKind = request.headers["x-wizmac-source"]
                 .flatMap(ControlPlaneSourceKind.init(rawValue:))
             var source = bodySource(from: rpcRequest)
-                ?? ControlPlaneSource(kind: headerKind ?? .http)
+                ?? ControlPlaneSource(kind: headerKind ?? defaultLocalSourceKind)
 
             if let headerKind {
                 source.kind = headerKind
@@ -228,7 +255,7 @@ struct HTTPControlPlaneSourceResolver: Sendable {
         }
 
         return ControlPlaneSource(
-            kind: .http,
+            kind: defaultLocalSourceKind,
             clientID: headerClientID,
             sessionID: headerSessionID,
             requiresConfirmationByDefault: headerConfirmationDefault || (bodySource(from: rpcRequest)?.requiresConfirmationByDefault ?? false)
@@ -311,8 +338,19 @@ private struct HTTPResponse {
         HTTPResponse(statusCode: 200, statusText: "OK", headers: ["Content-Type": "application/json"], body: body)
     }
 
+    static let accepted = HTTPResponse(
+        statusCode: 202,
+        statusText: "Accepted",
+        headers: [:],
+        body: Data()
+    )
+
     static func badRequest(body: String) -> HTTPResponse {
         HTTPResponse(statusCode: 400, statusText: "Bad Request", headers: ["Content-Type": "application/json"], body: Data(body.utf8))
+    }
+
+    static func forbidden(body: String) -> HTTPResponse {
+        HTTPResponse(statusCode: 403, statusText: "Forbidden", headers: ["Content-Type": "application/json"], body: Data(body.utf8))
     }
 
     static let unauthorized = HTTPResponse(
@@ -335,4 +373,35 @@ private struct HTTPResponse {
         headers: ["Allow": "POST", "Content-Type": "application/json"],
         body: Data(#"{"error":"method_not_allowed"}"#.utf8)
     )
+
+    static let mcpGetNotSupported = HTTPResponse(
+        statusCode: 405,
+        statusText: "Method Not Allowed",
+        headers: ["Allow": "POST"],
+        body: Data()
+    )
+}
+
+private extension HTTPRequest {
+    func originHeaderIsAllowed(allowedHost: String) -> Bool {
+        guard let origin = headers["origin"], origin.isEmpty == false else {
+            return true
+        }
+        guard let components = URLComponents(string: origin) else {
+            return false
+        }
+        guard let host = components.host?.lowercased() else {
+            return false
+        }
+
+        let normalizedAllowedHost = allowedHost.lowercased()
+        let localhostHosts = Set([
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            normalizedAllowedHost,
+        ])
+
+        return localhostHosts.contains(host)
+    }
 }

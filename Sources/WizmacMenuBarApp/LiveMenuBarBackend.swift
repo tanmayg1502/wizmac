@@ -1,13 +1,92 @@
 import Foundation
+import ServiceManagement
 import WizmacControlPlane
 import WizmacCore
 
+protocol LaunchAtLoginControlling {
+    var isSupported: Bool { get }
+    var isEnabled: Bool { get }
+    var state: LaunchAtLoginState { get }
+    func setEnabled(_ enabled: Bool) throws
+}
+
+private struct SystemLaunchAtLoginController: LaunchAtLoginControlling {
+    let service: SMAppService
+
+    init(service: SMAppService = .mainApp) {
+        self.service = service
+    }
+
+    var isSupported: Bool {
+        true
+    }
+
+    var isEnabled: Bool {
+        service.status == .enabled
+    }
+
+    var state: LaunchAtLoginState {
+        switch service.status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .disabled
+        case .requiresApproval:
+            return .requiresApproval
+        case .notFound:
+            return .notFound
+        @unknown default:
+            return .notFound
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        if enabled {
+            try service.register()
+        } else {
+            try service.unregister()
+        }
+    }
+}
+
+private struct UnavailableLaunchAtLoginController: LaunchAtLoginControlling {
+    var isSupported: Bool {
+        false
+    }
+
+    var isEnabled: Bool {
+        false
+    }
+
+    var state: LaunchAtLoginState {
+        .unsupported
+    }
+
+    func setEnabled(_ enabled: Bool) throws {}
+}
+
+private enum LaunchAtLoginControllerFactory {
+    static func makeDefault() -> any LaunchAtLoginControlling {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return UnavailableLaunchAtLoginController()
+        }
+
+        return SystemLaunchAtLoginController()
+    }
+}
+
 actor LiveMenuBarBackend: MenuBarBackend {
     private let client: WizmacServiceClient
+    private let launchAtLoginController: any LaunchAtLoginControlling
     private var lastPairing: RemotePairingSummary?
+    private var launchAtLoginLastError: String?
 
-    init() throws {
-        self.client = WizmacServiceClient(sourceKind: .menuBar)
+    init(
+        client: WizmacServiceClient = WizmacServiceClient(sourceKind: .menuBar),
+        launchAtLoginController: any LaunchAtLoginControlling = LaunchAtLoginControllerFactory.makeDefault()
+    ) throws {
+        self.client = client
+        self.launchAtLoginController = launchAtLoginController
     }
 
     static func makeDefault() -> any MenuBarBackend {
@@ -41,6 +120,29 @@ actor LiveMenuBarBackend: MenuBarBackend {
                 remoteServer: RemoteServerSettingsPatch(enabled: isRunning)
             )
         )
+
+        return await loadSnapshot()
+    }
+
+    func setLaunchAtLogin(_ isRunning: Bool) async -> MenuBarSnapshot {
+        guard launchAtLoginController.isSupported else {
+            return await loadSnapshot()
+        }
+
+        do {
+            try launchAtLoginController.setEnabled(isRunning)
+            launchAtLoginLastError = nil
+
+            if launchAtLoginController.state == .enabled || launchAtLoginController.state == .disabled {
+                _ = try? await client.updateSettings(
+                    WizmacSettingsPatch(
+                        launchAtLogin: launchAtLoginController.isEnabled
+                    )
+                )
+            }
+        } catch {
+            launchAtLoginLastError = error.localizedDescription
+        }
 
         return await loadSnapshot()
     }
@@ -138,6 +240,11 @@ actor LiveMenuBarBackend: MenuBarBackend {
             return .empty
         }
 
+        let launchState = launchAtLoginController.state
+        let launchEnabled = launchAtLoginController.isSupported
+            ? launchState == .enabled
+            : serviceSnapshot.settings.launchAtLogin
+
         return MenuBarSnapshot(
             permissions: loadPermissions(from: serviceSnapshot.permissions),
             serverState: ServerControlState(
@@ -148,6 +255,10 @@ actor LiveMenuBarBackend: MenuBarBackend {
                 remoteControlPlaneURL: serviceSnapshot.health.remoteControlPlaneURL,
                 lastError: serviceSnapshot.health.lastError
             ),
+            launchAtLoginEnabled: launchEnabled,
+            launchAtLoginSupported: launchAtLoginController.isSupported,
+            launchAtLoginState: launchState,
+            launchAtLoginError: launchAtLoginLastError,
             remoteClients: serviceSnapshot.remoteClients.map { loadRemoteClient(from: $0) },
             lastPairing: lastPairing,
             trustedAutomationSessionID: serviceSnapshot.trustedAutomationSession.id,

@@ -11,6 +11,7 @@ final class MenuBarViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.snapshot.permissions.isEmpty)
         XCTAssertTrue(viewModel.snapshot.serverState.localControlPlaneRunning)
+        XCTAssertTrue(viewModel.snapshot.launchAtLoginSupported)
     }
 
     func testTogglingLocalServerUpdatesState() async throws {
@@ -24,6 +25,92 @@ final class MenuBarViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.snapshot.serverState.localControlPlaneRunning)
         XCTAssertEqual(viewModel.snapshot.recentAudit.first?.title, "Local control plane stopped")
+    }
+
+    func testLaunchAtLoginToggleUpdatesSnapshotAndAudit() async throws {
+        let backend = PreviewMenuBarBackend(
+            snapshot: MenuBarSnapshot(
+                permissions: [],
+                serverState: ServerControlState(
+                    localControlPlaneRunning: true,
+                    remoteHTTPRunning: false
+                ),
+                launchAtLoginEnabled: false,
+                launchAtLoginSupported: true,
+                launchAtLoginState: .disabled,
+                recentAudit: [],
+                pendingApprovals: []
+            )
+        )
+        let viewModel = MenuBarViewModel(backend: backend)
+
+        await viewModel.load()
+        viewModel.setLaunchAtLogin(true)
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(viewModel.snapshot.launchAtLoginEnabled)
+        XCTAssertEqual(viewModel.snapshot.recentAudit.first?.title, "Launch at login enabled")
+    }
+
+    func testLaunchAtLoginToggleIsIgnoredWhenUnsupported() async throws {
+        let backend = PreviewMenuBarBackend(
+            snapshot: MenuBarSnapshot(
+                permissions: [],
+                serverState: ServerControlState(
+                    localControlPlaneRunning: true,
+                    remoteHTTPRunning: false
+                ),
+                launchAtLoginEnabled: false,
+                launchAtLoginSupported: false,
+                launchAtLoginState: .unsupported,
+                recentAudit: [],
+                pendingApprovals: []
+            )
+        )
+        let viewModel = MenuBarViewModel(backend: backend)
+
+        await viewModel.load()
+        viewModel.setLaunchAtLogin(true)
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertFalse(viewModel.snapshot.launchAtLoginEnabled)
+        XCTAssertEqual(viewModel.snapshot.recentAudit.first?.title, "Launch at login unavailable")
+        XCTAssertFalse(viewModel.snapshot.canToggleLaunchAtLogin)
+        XCTAssertEqual(viewModel.snapshot.launchAtLoginMessage, "Launch-at-login is only available in a packaged app.")
+    }
+
+    func testLaunchAtLoginStateMessagingReflectsApprovalAndPackagingState() {
+        let approvalSnapshot = MenuBarSnapshot(
+            permissions: [],
+            serverState: ServerControlState(
+                localControlPlaneRunning: true,
+                remoteHTTPRunning: false
+            ),
+            launchAtLoginEnabled: false,
+            launchAtLoginSupported: true,
+            launchAtLoginState: .requiresApproval,
+            recentAudit: [],
+            pendingApprovals: []
+        )
+        let missingBundleSnapshot = MenuBarSnapshot(
+            permissions: [],
+            serverState: ServerControlState(
+                localControlPlaneRunning: true,
+                remoteHTTPRunning: false
+            ),
+            launchAtLoginEnabled: false,
+            launchAtLoginSupported: true,
+            launchAtLoginState: .notFound,
+            recentAudit: [],
+            pendingApprovals: []
+        )
+
+        XCTAssertTrue(approvalSnapshot.canToggleLaunchAtLogin)
+        XCTAssertTrue(approvalSnapshot.launchAtLoginMessage.contains("approve the login item"))
+        XCTAssertFalse(missingBundleSnapshot.canToggleLaunchAtLogin)
+        XCTAssertTrue(missingBundleSnapshot.launchAtLoginMessage.contains("missing the packaged login-item registration"))
     }
 
     func testPairAndRevokeRemoteClientUpdatesSnapshot() async throws {

@@ -124,6 +124,25 @@ struct MenuBarDashboardView: View {
                     )
                 )
 
+                Toggle(
+                    "Launch at Login",
+                    isOn: Binding(
+                        get: { viewModel.snapshot.launchAtLoginEnabled },
+                        set: { viewModel.setLaunchAtLogin($0) }
+                    )
+                )
+                .disabled(viewModel.snapshot.canToggleLaunchAtLogin == false)
+
+                Text(viewModel.snapshot.launchAtLoginMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if let launchAtLoginError = viewModel.snapshot.launchAtLoginError {
+                    Text(launchAtLoginError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
                 Text("Remote requests still queue approval for risky actions, and paired clients enroll with certificates.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

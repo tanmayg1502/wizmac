@@ -34,6 +34,26 @@ Run the fixture app:
 swift run WizmacFixtureHost
 ```
 
+Run the bootstrap helper:
+
+```bash
+swift run wizmac init
+```
+
+`wizmac init` is meant to be the first-command readiness check. It should confirm that the shared service can start, report permission gaps, surface remote pairing hints when relevant, and write out a sample batch flow for the current workspace.
+
+## Homebrew Packaging
+
+See [docs/homebrew.md](homebrew.md) for the current packaging and release flow. The short version is:
+
+```bash
+brew tap <owner>/<tap>
+brew install --cask wizmac
+open /Applications/Wizmac.app
+```
+
+The cask is the main end-user install path. The formula remains available for power users who want a source-built CLI and `brew services`.
+
 ## Shared Service Lifecycle
 
 Most local callers do not need to start the service manually.
@@ -47,11 +67,13 @@ Most local callers do not need to start the service manually.
 
 The service host then:
 
-1. starts localhost HTTP on `127.0.0.1:7877/rpc`
+1. starts localhost HTTP on `127.0.0.1:7877/mcp` and `/rpc`
 2. starts an anonymous XPC listener
 3. writes the local transport descriptor file
 4. bootstraps runtime state
 5. syncs the optional remote HTTP server
+
+When the packaged menu bar app is running, it should be the long-lived owner for permission prompts, approval UX, launch-at-login registration, and keeping the local service available.
 
 ## Permissions
 
@@ -171,6 +193,7 @@ Or let the dispatcher do it automatically with `autoTrust=true` on eligible loca
 Two local-transport facts can look contradictory if you only read health output:
 
 - actual local client discovery uses the `service-endpoint.xpc` descriptor, which currently points to `http://127.0.0.1:7877/rpc`
+- the MCP-facing localhost endpoint for agent tools is `http://127.0.0.1:7877/mcp`
 - some service-health fields still report `xpc://wizmac/service` as the local control-plane URL
 
 When in doubt, trust the transport descriptor and real listener behavior.

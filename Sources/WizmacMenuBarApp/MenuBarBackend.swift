@@ -6,6 +6,7 @@ protocol MenuBarBackend: Sendable {
     func refresh() async -> MenuBarSnapshot
     func setLocalControlPlaneRunning(_ isRunning: Bool) async -> MenuBarSnapshot
     func setRemoteHTTPRunning(_ isRunning: Bool) async -> MenuBarSnapshot
+    func setLaunchAtLogin(_ isRunning: Bool) async -> MenuBarSnapshot
     func requestMissingPermissions() async -> MenuBarSnapshot
     func requestPermission(id: String) async -> MenuBarSnapshot
     func openPermissionSettings(id: String) async -> MenuBarSnapshot
@@ -59,6 +60,26 @@ actor PreviewMenuBarBackend: MenuBarBackend {
         appendAudit(
             title: isRunning ? "Remote HTTP enabled" : "Remote HTTP disabled",
             detail: "Menu bar toggle changed remote access availability."
+        )
+        return snapshotValue
+    }
+
+    func setLaunchAtLogin(_ isRunning: Bool) async -> MenuBarSnapshot {
+        guard snapshotValue.launchAtLoginSupported else {
+            snapshotValue.launchAtLoginState = .unsupported
+            appendAudit(
+                title: "Launch at login unavailable",
+                detail: "Preview mode cannot manage packaged-app login items here."
+            )
+            return snapshotValue
+        }
+
+        snapshotValue.launchAtLoginEnabled = isRunning
+        snapshotValue.launchAtLoginState = isRunning ? .enabled : .disabled
+        snapshotValue.launchAtLoginError = nil
+        appendAudit(
+            title: isRunning ? "Launch at login enabled" : "Launch at login disabled",
+            detail: "Menu bar toggle changed whether Wizmac starts at login."
         )
         return snapshotValue
     }
@@ -216,6 +237,10 @@ actor PreviewMenuBarBackend: MenuBarBackend {
             serviceStatus: "Running",
             localControlPlaneURL: "xpc://wizmac/service"
         ),
+        launchAtLoginEnabled: false,
+        launchAtLoginSupported: true,
+        launchAtLoginState: .disabled,
+        launchAtLoginError: nil,
         remoteClients: [
             RemoteClientSummary(
                 id: UUID(),
@@ -296,6 +321,12 @@ final class MenuBarViewModel: ObservableObject {
     func setRemoteHTTPRunning(_ isRunning: Bool) {
         Task {
             snapshot = await backend.setRemoteHTTPRunning(isRunning)
+        }
+    }
+
+    func setLaunchAtLogin(_ isRunning: Bool) {
+        Task {
+            snapshot = await backend.setLaunchAtLogin(isRunning)
         }
     }
 

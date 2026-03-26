@@ -57,6 +57,7 @@ swift test
 Build once, then use the fast path that matches your task:
 
 ```bash
+brew install --cask wizmac
 swift run wizmac help
 swift run wizmac service health
 swift run WizmacMenuBarApp
@@ -82,6 +83,19 @@ Capture a full app tree, then act on a discovered item in one command:
 ```bash
 swift run wizmac ui capture --app Slack --detail full
 swift run wizmac ui act --app Slack --query "jim" --activate true
+```
+
+Run the batch DSL against multiple steps:
+
+```bash
+swift run wizmac batch --step "ui.search query=Primary" --step "wait.ui.exists query=Save timeoutMs=5000"
+```
+
+Capture or record media:
+
+```bash
+swift run wizmac media screenshot --app Safari --path /tmp/safari.png
+swift run wizmac media record start --sessionID demo --path /tmp/wizmac.mp4
 ```
 
 Call the same tool through explicit tool syntax:
@@ -110,11 +124,28 @@ swift run wizmac mcp
 
 `wizmac mcp` currently speaks newline-delimited JSON-RPC over stdio.
 
+For installed agent integrations, the preferred surface is the shared localhost MCP endpoint at `http://127.0.0.1:7877/mcp`, owned by the menu bar app and shared service.
+
 Start the shared service with remote HTTP enabled:
 
 ```bash
 swift run wizmac serve --host 127.0.0.1 --port 47242
 ```
+
+Run the bootstrap helper:
+
+```bash
+swift run wizmac init
+swift run wizmac setup agents --all --dry-run
+```
+
+After the app is installed and running, seed the major local agent CLIs with:
+
+```bash
+swift run wizmac setup agents --all
+```
+
+That setup path registers Wizmac for Claude Code, Gemini CLI, Codex, and OpenClaw, and adds the matching memory or skill snippets where appropriate.
 
 Pair at least one remote client before exposing that listener. If remote HTTP is enabled with no paired identities, the current server behavior does not enforce remote authentication yet.
 
@@ -165,6 +196,7 @@ The meaning of each file and the operational caveats are documented in [docs/ope
 - [docs/control-plane.md](docs/control-plane.md): CLI, JSON-RPC, MCP, service methods, transports, and request semantics
 - [docs/operations.md](docs/operations.md): service lifecycle, permissions, persistence, remote pairing, and troubleshooting
 - [docs/testing.md](docs/testing.md): test suites, fixture-host workflows, and latency benchmarks
+- [docs/homebrew.md](docs/homebrew.md): formula and install notes for Homebrew packaging
 
 ### Repo-Local Skills For Agents
 
@@ -180,3 +212,27 @@ The meaning of each file and the operational caveats are documented in [docs/ope
 - The codebase is intentionally macOS-specific and leans on AppKit, AX APIs, and Network framework transports.
 
 If you are landing here to make changes, start with [AGENTS.md](AGENTS.md) and [docs/implementation-guide.md](docs/implementation-guide.md).
+- Pair a remote client first through `remote.pair` or the menu bar.
+- Remote requests must send both `Authorization: Bearer <token>` and `X-Client-ID: <paired-client-uuid>`.
+- Risky actions such as `remote.pair`, `remote.revoke`, clicks, copy, text writes, and AirPlay changes queue approval unless they come from trusted local origins like the menu bar.
+
+## Reducing Tool Calls and Token Usage
+
+When driving Wizmac via MCP/CLI, most latency comes from repeated graph captures and multiple round trips.
+Use the patterns below to keep tasks fast and robust:
+
+- Prefer `ui.execute` for multi-step flows (search + move + click/copy) so the service performs the sequence in one request.
+- Reuse `sessionID` and `snapshotID` from earlier `ui.search`/`ui.capture` responses to avoid rebuilding the accessibility graph.
+- Run `ui.prefetch` before a complex operation to warm graph caches for the target app/process.
+- Scope early with `app` or `pid` arguments to reduce search breadth and payload size.
+- Use `limit` aggressively on discovery calls when you only need the top few matches.
+- Keep `debugTimings` off outside profiling sessions; it adds response payload overhead.
+
+A practical low-call interaction loop is:
+
+1. `ui.prefetch` (optional warmup)
+2. `ui.search` with `app`/`pid` + tight `limit`
+3. `ui.execute` with the selected target IDs and `snapshotID`
+4. `ui.session_end` when the task is complete
+
+For local measurement, run `scripts/benchmark_wizmac_latency.sh` and compare cold vs warm runs while reusing the same app/session.

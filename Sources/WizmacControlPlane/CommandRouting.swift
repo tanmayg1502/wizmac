@@ -124,6 +124,26 @@ public actor ControlPlaneDispatcher {
         arguments: [String: StructuredValue],
         source: ControlPlaneSource
     ) async -> ControlPlaneActionResponse {
+        if let syntheticResponse = await syntheticToolResponse(
+            named: toolName,
+            arguments: arguments,
+            source: source
+        ) {
+            return syntheticResponse
+        }
+
+        return await dispatchConcreteTool(
+            named: toolName,
+            arguments: arguments,
+            source: source
+        )
+    }
+
+    private func dispatchConcreteTool(
+        named toolName: String,
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse {
         guard let request = registry.request(for: toolName, arguments: arguments, source: source) else {
             return ControlPlaneActionResponse(
                 status: .invalidRequest,
@@ -214,16 +234,7 @@ public actor ControlPlaneDispatcher {
         case "initialize":
             return JSONRPCResponse(
                 id: request.id,
-                result: .object([
-                    "protocolVersion": .string("2026-03-10"),
-                    "serverInfo": .object([
-                        "name": .string("wizmac-control-plane"),
-                        "version": .string("0.1.0"),
-                    ]),
-                    "capabilities": .object([
-                        "tools": .object([:]),
-                    ]),
-                ])
+                result: MCPProtocol.initializeResult(requestParams: request.params)
             )
         case "notifications/initialized":
             return nil
@@ -336,6 +347,527 @@ public actor ControlPlaneDispatcher {
         }
     }
 
+    private func syntheticToolResponse(
+        named toolName: String,
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse? {
+        switch toolName {
+        case "batch.run":
+            return await runBatch(arguments: arguments, source: source)
+        case "wait.ui.exists":
+            return await waitUIExists(arguments: arguments, source: source)
+        case "wait.window.focused":
+            return await waitWindowFocused(arguments: arguments, source: source)
+        case "wait.condition":
+            return await waitCondition(arguments: arguments, source: source)
+        default:
+            return nil
+        }
+    }
+
+    private func runBatch(
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse {
+        guard let stepValues = arguments["steps"]?.arrayValue, stepValues.isEmpty == false else {
+            return ControlPlaneActionResponse(
+                status: .invalidRequest,
+                message: "batch.run requires a non-empty steps array."
+            )
+        }
+
+        let maxParallel = max(arguments["maxParallel"]?.intValue ?? 1, 1)
+        guard maxParallel == 1 else {
+            return ControlPlaneActionResponse(
+                status: .invalidRequest,
+                message: "batch.run currently supports only --max-parallel 1."
+            )
+        }
+
+        let failFast = arguments["continueOnError"]?.boolValue == true
+            ? false
+            : (arguments["failFast"]?.boolValue ?? true)
+        let cachePolicy = (arguments["cachePolicy"]?.stringValue ?? "batch").lowercased()
+        let snapshotReuse = (arguments["snapshotReuse"]?.stringValue ?? "best_effort").lowercased()
+        let invalidateOn = Set(
+            (arguments["invalidateOn"]?.arrayValue?.compactMap(\.stringValue) ?? defaultBatchInvalidationActions)
+                .map { $0.lowercased() }
+        )
+
+        var batchAmbient = ambientBatchArguments(from: arguments)
+        var nextStepAmbient: [String: StructuredValue] = [:]
+        var results: [StructuredValue] = []
+        let encoder = ISO8601DateFormatter()
+        var overallSucceeded = true
+
+        for (index, rawStep) in stepValues.enumerated() {
+            guard let step = batchStep(from: rawStep) else {
+                overallSucceeded = false
+                results.append(
+                    .object([
+                        "index": .number(Double(index)),
+                        "outcome": .string(ControlPlaneStatus.invalidRequest.rawValue),
+                        "error": .string("Each batch step must include an action/tool and arguments."),
+                        "retryCount": .number(0),
+                    ])
+                )
+                if failFast { break }
+                continue
+            }
+
+            if step.action == "batch.run" {
+                overallSucceeded = false
+                results.append(
+                    .object([
+                        "index": .number(Double(index)),
+                        "action": .string(step.action),
+                        "outcome": .string(ControlPlaneStatus.invalidRequest.rawValue),
+                        "error": .string("Nested batch.run steps are not supported."),
+                        "retryCount": .number(0),
+                    ])
+                )
+                if failFast { break }
+                continue
+            }
+
+            let inheritedContext = inheritedBatchContext(
+                cachePolicy: cachePolicy,
+                batchAmbient: batchAmbient,
+                nextStepAmbient: nextStepAmbient
+            )
+            let resolvedArguments = mergedBatchArguments(
+                inheritedContext: inheritedContext,
+                explicitArguments: step.arguments,
+                snapshotReuse: snapshotReuse
+            )
+            if snapshotReuse == "strict",
+               resolvedArguments["sessionID"] != nil,
+               resolvedArguments["snapshotID"] == nil
+            {
+                overallSucceeded = false
+                results.append(
+                    .object([
+                        "index": .number(Double(index)),
+                        "action": .string(step.action),
+                        "request": .object([
+                            "action": .string(step.action),
+                            "arguments": .object(resolvedArguments),
+                        ]),
+                        "outcome": .string(ControlPlaneStatus.invalidRequest.rawValue),
+                        "error": .string("snapshotReuse=strict requires a reusable snapshotID before the step runs."),
+                        "retryCount": .number(0),
+                    ])
+                )
+                if failFast { break }
+                continue
+            }
+
+            let startedAt = Date()
+            let response = await callTool(
+                named: step.action,
+                arguments: resolvedArguments,
+                source: source
+            )
+            let endedAt = Date()
+            let durationMs = max(endedAt.timeIntervalSince(startedAt) * 1_000, 0)
+
+            let extractedContext = batchContext(from: response.payload)
+            let invalidatedContext = invalidateOn.contains(step.action.lowercased()) ? [:] : extractedContext
+            switch cachePolicy {
+            case "none":
+                nextStepAmbient = [:]
+            case "step":
+                nextStepAmbient = invalidatedContext
+            default:
+                for (key, value) in invalidatedContext {
+                    batchAmbient[key] = value
+                }
+                nextStepAmbient = invalidatedContext
+            }
+
+            let succeeded = response.status == .success
+            overallSucceeded = overallSucceeded && succeeded
+            results.append(
+                .object([
+                    "index": .number(Double(index)),
+                    "action": .string(step.action),
+                    "start": .string(encoder.string(from: startedAt)),
+                    "end": .string(encoder.string(from: endedAt)),
+                    "durationMs": .number(durationMs),
+                    "request": .object([
+                        "action": .string(step.action),
+                        "arguments": .object(resolvedArguments),
+                    ]),
+                    "result": encoded(response),
+                    "error": response.status == .success ? .null : .string(response.message ?? "Step failed."),
+                    "retryCount": .number(0),
+                ])
+            )
+
+            if succeeded == false, failFast {
+                break
+            }
+        }
+
+        return ControlPlaneActionResponse(
+            status: overallSucceeded ? .success : .failed,
+            payload: .object([
+                "cachePolicy": .string(cachePolicy),
+                "snapshotReuse": .string(snapshotReuse),
+                "stepCount": .number(Double(results.count)),
+                "results": .array(results),
+                "sessionID": batchAmbient["sessionID"] ?? .null,
+                "snapshotID": batchAmbient["snapshotID"] ?? .null,
+                "graphID": batchAmbient["graphID"] ?? .null,
+                "trustedSessionID": batchAmbient["trustedSessionID"] ?? .null,
+            ]),
+            message: overallSucceeded ? "Batch completed." : "Batch completed with step failures."
+        )
+    }
+
+    private func waitUIExists(
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse {
+        let timeoutMs = max(arguments["timeoutMs"]?.intValue ?? 2_500, 50)
+        let intervalMs = max(arguments["intervalMs"]?.intValue ?? 120, 20)
+        let stableForMs = max(arguments["stableForMs"]?.intValue ?? 0, 0)
+        let startedAt = Date()
+        var stableStartedAt: Date?
+        var lastPayload: StructuredValue?
+
+        while elapsedMs(since: startedAt) <= timeoutMs {
+            var searchArguments = forwardedArguments(
+                from: arguments,
+                keys: [
+                    "query",
+                    "targetID",
+                    "limit",
+                    "app",
+                    "pid",
+                    "sessionID",
+                    "snapshotID",
+                    "scope",
+                    "includeMenus",
+                    "launchIfNeeded",
+                    "activate",
+                    "adapter",
+                ]
+            )
+            if searchArguments["limit"] == nil {
+                searchArguments["limit"] = .number(1)
+            }
+            let response = await dispatchConcreteTool(
+                named: "ui.search",
+                arguments: searchArguments,
+                source: source
+            )
+            if response.status == .success,
+               let targets = response.payload?["targets"]?.arrayValue,
+               targets.isEmpty == false
+            {
+                if stableForMs == 0 {
+                    return withWaitMetadata(
+                        response,
+                        elapsedMs: elapsedMs(since: startedAt),
+                        stableForMs: 0
+                    )
+                }
+                if stableStartedAt == nil {
+                    stableStartedAt = Date()
+                }
+                if let stableStartedAt, elapsedMs(since: stableStartedAt) >= stableForMs {
+                    return withWaitMetadata(
+                        response,
+                        elapsedMs: elapsedMs(since: startedAt),
+                        stableForMs: stableForMs
+                    )
+                }
+            } else {
+                stableStartedAt = nil
+                lastPayload = response.payload
+                if response.status == .permissionRequired {
+                    return response
+                }
+            }
+            await sleep(milliseconds: intervalMs)
+        }
+
+        return ControlPlaneActionResponse(
+            status: .failed,
+            payload: lastPayload,
+            message: "Timed out waiting for a matching UI target."
+        )
+    }
+
+    private func waitWindowFocused(
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse {
+        let timeoutMs = max(arguments["timeoutMs"]?.intValue ?? 2_500, 50)
+        let intervalMs = max(arguments["intervalMs"]?.intValue ?? 120, 20)
+        let stableForMs = max(arguments["stableForMs"]?.intValue ?? 0, 0)
+        let startedAt = Date()
+        var stableStartedAt: Date?
+        var lastFrontmost: StructuredValue?
+
+        while elapsedMs(since: startedAt) <= timeoutMs {
+            let response = await dispatchConcreteTool(
+                named: "window.list",
+                arguments: [:],
+                source: source
+            )
+            if response.status != .success {
+                return response
+            }
+
+            let windows = response.payload?.arrayValue ?? []
+            let frontmost = windows.first
+            lastFrontmost = frontmost
+            if let frontmost, focusedWindowMatches(frontmost, arguments: arguments) {
+                if stableForMs == 0 {
+                    return ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .object([
+                            "window": frontmost,
+                            "matched": .bool(true),
+                            "elapsedMs": .number(Double(elapsedMs(since: startedAt))),
+                            "stableForMs": .number(0),
+                        ]),
+                        message: "Focused window matched."
+                    )
+                }
+                if stableStartedAt == nil {
+                    stableStartedAt = Date()
+                }
+                if let stableStartedAt, elapsedMs(since: stableStartedAt) >= stableForMs {
+                    return ControlPlaneActionResponse(
+                        status: .success,
+                        payload: .object([
+                            "window": frontmost,
+                            "matched": .bool(true),
+                            "elapsedMs": .number(Double(elapsedMs(since: startedAt))),
+                            "stableForMs": .number(Double(stableForMs)),
+                        ]),
+                        message: "Focused window matched."
+                    )
+                }
+            } else {
+                stableStartedAt = nil
+            }
+
+            await sleep(milliseconds: intervalMs)
+        }
+
+        return ControlPlaneActionResponse(
+            status: .failed,
+            payload: .object([
+                "window": lastFrontmost ?? .null,
+                "matched": .bool(false),
+            ]),
+            message: "Timed out waiting for the requested focused window."
+        )
+    }
+
+    private func waitCondition(
+        arguments: [String: StructuredValue],
+        source: ControlPlaneSource
+    ) async -> ControlPlaneActionResponse {
+        switch (arguments["predicate"]?.stringValue ?? "").lowercased() {
+        case "ui.exists", "ui_exists", "exists":
+            return await waitUIExists(arguments: arguments, source: source)
+        case "window.focused", "window_focused", "focused_window":
+            return await waitWindowFocused(arguments: arguments, source: source)
+        default:
+            return ControlPlaneActionResponse(
+                status: .invalidRequest,
+                message: "wait.condition supports predicates 'ui.exists' and 'window.focused'."
+            )
+        }
+    }
+
+    private func batchStep(from value: StructuredValue) -> (action: String, arguments: [String: StructuredValue])? {
+        guard let object = value.objectValue else { return nil }
+        guard let action = object["action"]?.stringValue ?? object["tool"]?.stringValue else {
+            return nil
+        }
+        let arguments = object["args"]?.objectValue ?? object["arguments"]?.objectValue ?? [:]
+        return (action, arguments)
+    }
+
+    private func ambientBatchArguments(from arguments: [String: StructuredValue]) -> [String: StructuredValue] {
+        let keys = [
+            "app",
+            "pid",
+            "sessionID",
+            "snapshotID",
+            "graphID",
+            "scope",
+            "includeMenus",
+            "launchIfNeeded",
+            "activate",
+            "adapter",
+            "autoTrust",
+            "trustedSessionID",
+        ]
+        return forwardedArguments(from: arguments, keys: keys)
+    }
+
+    private func inheritedBatchContext(
+        cachePolicy: String,
+        batchAmbient: [String: StructuredValue],
+        nextStepAmbient: [String: StructuredValue]
+    ) -> [String: StructuredValue] {
+        switch cachePolicy {
+        case "none":
+            return [:]
+        case "step":
+            return nextStepAmbient
+        default:
+            return batchAmbient
+        }
+    }
+
+    private func mergedBatchArguments(
+        inheritedContext: [String: StructuredValue],
+        explicitArguments: [String: StructuredValue],
+        snapshotReuse: String
+    ) -> [String: StructuredValue] {
+        var merged = inheritedContext
+        for (key, value) in explicitArguments {
+            merged[key] = value
+        }
+        if snapshotReuse == "off" {
+            if explicitArguments["snapshotID"] == nil {
+                merged.removeValue(forKey: "snapshotID")
+            }
+            if explicitArguments["graphID"] == nil {
+                merged.removeValue(forKey: "graphID")
+            }
+        }
+        return merged
+    }
+
+    private func batchContext(from payload: StructuredValue?) -> [String: StructuredValue] {
+        guard let object = payload?.objectValue else { return [:] }
+        let keys = ["sessionID", "snapshotID", "graphID", "trustedSessionID", "targetID"]
+        return keys.reduce(into: [:]) { result, key in
+            if let value = object[key], value != .null {
+                result[key] = value
+            }
+        }
+    }
+
+    private func withWaitMetadata(
+        _ response: ControlPlaneActionResponse,
+        elapsedMs: Int,
+        stableForMs: Int
+    ) -> ControlPlaneActionResponse {
+        guard let payload = response.payload?.objectValue else {
+            return response
+        }
+        var updated = payload
+        updated["elapsedMs"] = .number(Double(elapsedMs))
+        updated["stableForMs"] = .number(Double(stableForMs))
+        return ControlPlaneActionResponse(
+            status: response.status,
+            payload: .object(updated),
+            message: response.message,
+            auditID: response.auditID,
+            confirmationToken: response.confirmationToken
+        )
+    }
+
+    private func focusedWindowMatches(
+        _ value: StructuredValue,
+        arguments: [String: StructuredValue]
+    ) -> Bool {
+        guard let window = value.objectValue else { return false }
+        if let requestedWindowID = arguments["windowID"]?.intValue,
+           window["id"]?.intValue != requestedWindowID {
+            return false
+        }
+
+        let requestedTitle = arguments["windowTitle"]?.stringValue ?? arguments["title"]?.stringValue
+        if let requestedTitle,
+           window["title"]?.stringValue != requestedTitle
+            && localizedCaseInsensitiveContains(window["title"]?.stringValue, requestedTitle) == false {
+            return false
+        }
+
+        if let requestedQuery = arguments["query"]?.stringValue {
+            let haystack = [
+                window["title"]?.stringValue ?? "",
+                window["appName"]?.stringValue ?? "",
+            ].joined(separator: " ")
+            if localizedCaseInsensitiveContains(haystack, requestedQuery) == false {
+                return false
+            }
+        }
+
+        if let requestedPID = arguments["pid"]?.intValue,
+           window["pid"]?.intValue != requestedPID {
+            return false
+        }
+
+        if let requestedApp = arguments["app"]?.stringValue,
+           localizedCaseInsensitiveContains(window["appName"]?.stringValue, requestedApp) == false {
+            return false
+        }
+
+        return true
+    }
+
+    private func forwardedArguments(
+        from arguments: [String: StructuredValue],
+        keys: [String]
+    ) -> [String: StructuredValue] {
+        keys.reduce(into: [:]) { result, key in
+            if let value = arguments[key] {
+                result[key] = value
+            }
+        }
+    }
+
+    private func elapsedMs(since date: Date) -> Int {
+        Int(Date().timeIntervalSince(date) * 1_000)
+    }
+
+    private func sleep(milliseconds: Int) async {
+        guard milliseconds > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+    }
+
+    private func localizedCaseInsensitiveContains(_ lhs: String?, _ rhs: String) -> Bool {
+        guard let lhs else { return false }
+        return lhs.range(of: rhs, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
+    private var defaultBatchInvalidationActions: [String] {
+        [
+            "ui.act",
+            "ui.copy",
+            "ui.open",
+            "ui.select",
+            "ui.toggle",
+            "ui.focus",
+            "ui.submit",
+            "ui.choose_file",
+            "ui.drag",
+            "ui.gesture",
+            "input.key_combo",
+            "input.key_sequence",
+            "text.insert",
+            "text.send_keys",
+            "window.focus",
+            "scroll.step",
+            "scroll.to",
+            "scroll.until",
+            "scroll.into_view",
+        ]
+    }
+
     private func encoded(_ response: ControlPlaneActionResponse) -> StructuredValue {
         let encoder = JSONEncoder()
         guard
@@ -380,7 +912,7 @@ private func decode<T: Decodable>(_ type: T.Type, from value: StructuredValue) t
 }
 
 public enum ControlPlaneEnvironment {
-    static let fixtureEnvironmentKey = "WIZMAC_CONTROL_PLANE_FIXTURE"
+    public static let fixtureEnvironmentKey = "WIZMAC_CONTROL_PLANE_FIXTURE"
 
     public static func makeDispatcher(
         registry: ControlPlaneToolRegistry = .default,

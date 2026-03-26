@@ -31,6 +31,8 @@ public actor WizmacServiceRuntime {
     private var uiSession = UISessionState()
     private var hintSession = HintSessionState()
     private var scrollSession = ScrollSessionState()
+    private var mediaRecordingSession = MediaRecordingSessionState()
+    private var mediaStreamSession = MediaStreamSessionState()
     private var trustedAutomationSession = TrustedAutomationSessionState()
 
     public init() throws {
@@ -107,6 +109,8 @@ public actor WizmacServiceRuntime {
             uiSession: uiSession,
             hintSession: hintSession,
             scrollSession: scrollSession,
+            mediaRecordingSession: mediaRecordingSession,
+            mediaStreamSession: mediaStreamSession,
             trustedAutomationSession: trustedAutomationSession
         )
     }
@@ -699,6 +703,30 @@ private extension WizmacServiceRuntime {
             )
         case .textDetach:
             textSession = ServiceTextSessionStatus()
+        case .mediaRecord:
+            let object = payload.objectValue
+            let status = object?["status"]?.stringValue ?? ""
+            let sessionID = object?["sessionID"]?.stringValue
+            mediaRecordingSession = MediaRecordingSessionState(
+                isActive: status == "recording",
+                sessionID: sessionID,
+                path: object?["path"]?.stringValue,
+                codec: object?["codec"]?.stringValue,
+                fps: object?["fps"]?.intValue,
+                scopeDescription: object?["scope"]?.stringValue,
+                startedAt: object?["startedAt"]?.stringValue.flatMap(ISO8601DateFormatter().date(from:))
+            )
+        case .mediaStream:
+            let object = payload.objectValue
+            let status = object?["status"]?.stringValue ?? ""
+            mediaStreamSession = MediaStreamSessionState(
+                isActive: status == "streaming",
+                sessionID: object?["sessionID"]?.stringValue,
+                format: object?["format"]?.stringValue,
+                endpoint: object?["endpoint"]?.stringValue,
+                scopeDescription: object?["scope"]?.stringValue,
+                startedAt: object?["startedAt"]?.stringValue.flatMap(ISO8601DateFormatter().date(from:))
+            )
         default:
             break
         }
@@ -743,6 +771,26 @@ private extension WizmacServiceRuntime {
                     kind: .text,
                     title: "Text Mode",
                     detail: "\(textSession.mode) in \(textSession.applicationName ?? "focused input")"
+                )
+            )
+        }
+
+        if mediaRecordingSession.isActive {
+            sessions.append(
+                ServiceSessionRecord(
+                    kind: .mediaRecording,
+                    title: "Screen Recording",
+                    detail: mediaRecordingSession.path ?? mediaRecordingSession.scopeDescription ?? "Active screen recording"
+                )
+            )
+        }
+
+        if mediaStreamSession.isActive {
+            sessions.append(
+                ServiceSessionRecord(
+                    kind: .mediaStreaming,
+                    title: "Screen Stream",
+                    detail: mediaStreamSession.endpoint ?? mediaStreamSession.scopeDescription ?? "Active local stream"
                 )
             )
         }
@@ -890,20 +938,37 @@ public actor WizmacServiceProcessManager {
         }
 
         let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-        let candidates = [
-            (executable.deletingLastPathComponent().appendingPathComponent("WizmacService"), [String]()),
-            (URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/WizmacService"), [String]()),
-            (URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/arm64-apple-macosx/debug/WizmacService"), [String]()),
-            (executable.deletingLastPathComponent().appendingPathComponent("wizmac"), ["service", "start"]),
-            (URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/wizmac"), ["service", "start"]),
-            (URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/arm64-apple-macosx/debug/wizmac"), ["service", "start"]),
-        ]
+        let candidates = Self.serviceLaunchCandidates(
+            executable: executable,
+            workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        )
 
         if let match = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.0.path) }) {
             return match
         }
 
         throw ControlPlaneError.unsupported("Unable to find a Wizmac service executable or `wizmac service start` command.")
+    }
+
+    static func serviceLaunchCandidates(
+        executable: URL,
+        workingDirectory: URL
+    ) -> [(URL, [String])] {
+        let executableDirectory = executable.deletingLastPathComponent()
+        let appContentsDirectory = executableDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        return [
+            (executableDirectory.appendingPathComponent("WizmacService"), [String]()),
+            (appContentsDirectory.appendingPathComponent("MacOS/WizmacService"), [String]()),
+            (workingDirectory.appendingPathComponent(".build/debug/WizmacService"), [String]()),
+            (workingDirectory.appendingPathComponent(".build/arm64-apple-macosx/debug/WizmacService"), [String]()),
+            (executableDirectory.appendingPathComponent("wizmac"), ["service", "start"]),
+            (appContentsDirectory.appendingPathComponent("Resources/bin/wizmac"), ["service", "start"]),
+            (workingDirectory.appendingPathComponent(".build/debug/wizmac"), ["service", "start"]),
+            (workingDirectory.appendingPathComponent(".build/arm64-apple-macosx/debug/wizmac"), ["service", "start"]),
+        ]
     }
 }
 

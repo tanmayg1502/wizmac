@@ -75,6 +75,44 @@ Notes:
 - `start` boots the shared service and waits
 - `health`, `snapshot`, and `settings` talk to the long-lived service client
 
+### Batch DSL
+
+Format:
+
+```bash
+swift run wizmac batch --step "<tool call>" --step "<tool call>"
+swift run wizmac batch --file flow.wzb --format yaml|json|line
+```
+
+Notes:
+
+- `--fail-fast` is the default
+- `--continue-on-error` keeps running later steps after a failure
+- `--output json|pretty` controls the report wrapper
+- `--max-parallel 1` keeps v1 strictly sequential
+- `--cache-policy` can be `none`, `step`, or `batch`
+- `--snapshot-reuse` can be `off`, `best_effort`, or `strict`
+- `--invalidate-on` lists the action types that should invalidate cached snapshots
+- batch ambient flags such as `--app`, `--pid`, `--scope`, `--include-menus`, `--launch-if-needed`, `--activate`, `--auto-trust`, and `--trusted-session-id` flow into `batch.run`
+- `batch.run` should return per-step `start`, `end`, `duration`, `request`, `result`/`error`, and `retryCount` fields
+
+Example flow:
+
+```yaml
+- action: ui.search
+  args:
+    query: Primary
+- action: wait.ui.exists
+  args:
+    query: Save
+    timeoutMs: 5000
+    intervalMs: 200
+- action: ui.act
+  args:
+    query: Save
+    activate: true
+```
+
 ### HTTP bootstrap helper
 
 Format:
@@ -88,6 +126,52 @@ With no flags, this behaves like foreground service start. When host or port fla
 Current limitation:
 
 - the CLI bootstrap helper only accepts `/rpc`
+
+### Media helper commands
+
+Format:
+
+```bash
+swift run wizmac media screenshot --app Safari --path /tmp/safari.png
+swift run wizmac media record start --sessionID demo --path /tmp/wizmac.mp4
+swift run wizmac media stream start --format mjpeg
+```
+
+`media.screenshot` captures a single image, `media.record` manages long-lived recording sessions, and `media.stream` exposes a live stream mode for more advanced operator workflows.
+
+### Init Helper
+
+Format:
+
+```bash
+swift run wizmac init
+```
+
+`wizmac init` is the bootstrap command for local readiness checks. It should:
+
+- verify the shared service can start
+- check the permissions required for the current environment
+- offer pairing or setup hints when remote control is enabled
+- generate a sample batch file for first-run workflows
+- optionally run a fixture smoke flow when requested
+
+### Agent Setup Helper
+
+Format:
+
+```bash
+swift run wizmac setup agents --all
+swift run wizmac setup agents claude gemini codex openclaw
+swift run wizmac setup agents codex --workspace-root /path/to/repo
+```
+
+`wizmac setup agents` is the installation helper for local agent CLIs. It should:
+
+- register Wizmac on `http://127.0.0.1:7877/mcp` for Claude Code, Gemini CLI, and Codex
+- seed user memory files such as `~/.claude/CLAUDE.md` and `~/.gemini/GEMINI.md`
+- optionally update a repo-local `AGENTS.md` file for Codex when a workspace root is available
+- install a shared OpenClaw skill in `~/.openclaw/skills/wizmac/SKILL.md`
+- support `--dry-run` so the operator can inspect planned writes and commands first
 
 ## JSON-RPC Methods
 
@@ -139,6 +223,16 @@ These are useful for MCP-style clients that want current state without inventing
 - `ui.drag`
 - `ui.session_end`
 
+### Input
+
+- `input.key_combo`
+- `input.key_sequence`
+- `ui.gesture`
+
+### Batch
+
+- `batch.run`
+
 ### Scroll
 
 - `scroll.targets`
@@ -152,6 +246,7 @@ These are useful for MCP-style clients that want current state without inventing
 - `window.list`
 - `window.focus`
 - `window.exclude`
+- `window.assert`
 
 ### Text
 
@@ -162,8 +257,19 @@ These are useful for MCP-style clients that want current state without inventing
 - `text.mode`
 - `text.status`
 
+### Wait
+
+- `wait.ui.exists`
+- `wait.window.focused`
+- `wait.condition`
+
+The new `wait.*` tools should use a common timeout model, a polling interval, and optional `stableForMs` stabilization for flaky UI transitions.
+
 ### Media / Display
 
+- `media.screenshot`
+- `media.record`
+- `media.stream`
 - `media.music_volume`
 - `display.airplay_devices`
 - `display.airplay_connect`
@@ -196,6 +302,10 @@ Many tools share a common set of routing and execution arguments:
 - `sessionID` and `snapshotID` for stateful UI flows
 - `targetID` to resolve a previously captured UI element exactly
 - `query` for one-shot resolution on `ui.search`, `ui.act`, `ui.copy`, and text insertion flows
+- `timeoutMs` for bounded waits and timing-aware tool calls
+- `preDelayMs` and `postDelayMs` for mutating input flows
+- `intervalMs` and `stableForMs` for polling/wait tools
+- `cachePolicy`, `snapshotReuse`, and `invalidateOn` for batch execution
 - `scope` and `includeMenus` for accessibility-tree breadth
 - `debugTimings` for instrumentation
 - `autoTrust` and `trustedSessionID` for trusted local automation
@@ -273,12 +383,12 @@ Operational note:
 The shared service always hosts an unauthenticated local HTTP JSON-RPC endpoint on:
 
 ```text
-http://127.0.0.1:7877/rpc
+http://127.0.0.1:7877/mcp
 ```
 
-Because this local surface is trusted, forwarded source headers can be honored.
+This is the preferred localhost endpoint for MCP-aware agent clients. The legacy JSON-RPC path at `http://127.0.0.1:7877/rpc` still exists for direct transport clients.
 
-The HTTP server also accepts `/mcp` as an alias path for JSON-RPC traffic.
+Because this local surface is trusted, forwarded source headers can be honored. MCP requests on `/mcp` additionally enforce loopback-style `Origin` validation and protocol-version negotiation.
 
 ### Anonymous XPC
 
