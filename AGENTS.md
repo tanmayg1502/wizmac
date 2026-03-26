@@ -135,3 +135,10 @@ If your environment supports repo-local skills, use:
 - [skills/wizmac-fixture-lab/SKILL.md](skills/wizmac-fixture-lab/SKILL.md)
 
 They are written to complement this repo's docs rather than duplicate them.
+
+<!-- WIZMAC:codex_agents:BEGIN -->
+## Wizmac
+
+When a task requires interacting with the user's local Mac UI, windows, clipboard, focused text, or media, use the `wizmac` MCP server first.
+Prefer read-only inspection tools before state-changing tools, and respect Wizmac approval requests.
+<!-- WIZMAC:codex_agents:END -->
