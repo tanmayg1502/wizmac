@@ -4,6 +4,16 @@ public protocol ActionExecutor: Sendable {
     func execute(_ request: ActionRequest) async -> ActionResult
 }
 
+public protocol ApprovalPreparingActionExecutor: ActionExecutor {
+    func prepareForApproval(_ request: ActionRequest) async -> ActionRequest
+}
+
+public extension ApprovalPreparingActionExecutor {
+    func prepareForApproval(_ request: ActionRequest) async -> ActionRequest {
+        request
+    }
+}
+
 public actor CommandBus {
     private let executor: ActionExecutor
     private let auditStore: AuditStore
@@ -24,10 +34,17 @@ public actor CommandBus {
 
     public func dispatch(_ request: ActionRequest) async -> ActionResult {
         do {
-            if request.action == .systemConfirmationStatus {
+            let preparedRequest: ActionRequest
+            if let approvalPreparingExecutor = executor as? ApprovalPreparingActionExecutor {
+                preparedRequest = await approvalPreparingExecutor.prepareForApproval(request)
+            } else {
+                preparedRequest = request
+            }
+
+            if preparedRequest.action == .systemConfirmationStatus {
                 if
-                    let approvalID = request.string(for: "approvalID"),
-                    let decisionRaw = request.string(for: "decision"),
+                    let approvalID = preparedRequest.string(for: "approvalID"),
+                    let decisionRaw = preparedRequest.string(for: "decision"),
                     let id = UUID(uuidString: approvalID),
                     let decision = ApprovalDecision(rawValue: decisionRaw)
                 {
@@ -36,8 +53,8 @@ public actor CommandBus {
 
                 let records = try await approvalStore.list()
                 return ActionResult(
-                    requestID: request.id,
-                    action: request.action,
+                    requestID: preparedRequest.id,
+                    action: preparedRequest.action,
                     outcome: .success,
                     message: "Fetched pending approvals.",
                     payload: .array(records.map { record in
@@ -53,12 +70,12 @@ public actor CommandBus {
                 )
             }
 
-            if let approval = try await approvalPolicy.evaluate(request) {
-                try await approvalStore.enqueue(PendingApprovalRecord(approval: approval, request: request))
-                let result = ActionResult.confirmationRequired(for: request, approval: approval)
+            if let approval = try await approvalPolicy.evaluate(preparedRequest) {
+                try await approvalStore.enqueue(PendingApprovalRecord(approval: approval, request: preparedRequest))
+                let result = ActionResult.confirmationRequired(for: preparedRequest, approval: approval)
                 try await auditStore.append(
                     AuditEntry(
-                        request: request,
+                        request: preparedRequest,
                         outcome: result.outcome,
                         message: "Queued for approval: \(approval.summary)"
                     )
@@ -66,9 +83,9 @@ public actor CommandBus {
                 return result
             }
 
-            let result = await executor.execute(request)
+            let result = await executor.execute(preparedRequest)
             try await auditStore.append(
-                AuditEntry(request: request, outcome: result.outcome, message: result.message)
+                AuditEntry(request: preparedRequest, outcome: result.outcome, message: result.message)
             )
             return result
         } catch {

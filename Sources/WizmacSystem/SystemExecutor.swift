@@ -3,7 +3,7 @@ import Foundation
 import WizmacCore
 import WizmacTextMode
 
-final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
+final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionExecutor {
     private struct ResolvedTargetApplication {
         var pid: pid_t?
         var appName: String?
@@ -205,6 +205,40 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
                 message: "Confirmation status is served directly by the command bus."
             )
         }
+    }
+
+    public func prepareForApproval(_ request: ActionRequest) async -> ActionRequest {
+        guard approvalFreezableActions.contains(request.action) else { return request }
+        guard request.string(for: "targetID") == nil else { return request }
+        guard request.string(for: "query")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return request
+        }
+
+        let currentSettings = await settings()
+        let resolvedApplication = resolvePID(from: request)
+        if resolvedApplication.unresolvedApp != nil {
+            return request
+        }
+
+        let targetResolution = resolveUITarget(
+            for: request,
+            resolvedApplication: resolvedApplication,
+            currentSettings: currentSettings
+        )
+        guard let targetLookup = targetResolution.targetLookup else {
+            return request
+        }
+
+        var additions: [String: JSONValue] = [
+            "targetID": .string(targetLookup.target.id),
+        ]
+        if request.string(for: "sessionID") == nil {
+            additions["sessionID"] = .string(targetLookup.metrics.sessionID)
+        }
+        if request.string(for: "snapshotID") == nil {
+            additions["snapshotID"] = .string(targetLookup.metrics.snapshotID)
+        }
+        return request.with(arguments: additions)
     }
 
     private func settings() async -> WizmacSettings {
@@ -660,6 +694,20 @@ final class MacAutomationExecutor: @unchecked Sendable, ActionExecutor {
             return nil
         }
         return trimmed
+    }
+
+    private var approvalFreezableActions: Set<ActionName> {
+        [
+            .uiAct,
+            .uiCopy,
+            .uiOpen,
+            .uiSelect,
+            .uiToggle,
+            .uiFocus,
+            .uiSubmit,
+            .uiChooseFile,
+            .uiDrag,
+        ]
     }
 
     private func uiCaptureResult(for request: ActionRequest) async -> ActionResult {

@@ -14,13 +14,13 @@ final class CommandBusTests: XCTestCase {
         let result = await harness.bus.dispatch(request)
         let auditEntries = try await harness.auditStore.recent(limit: 10)
         let pendingApprovals = await harness.bus.pendingApprovals()
+        let executedRequests = await harness.recorder.executedRequests()
 
         XCTAssertEqual(result.outcome, .confirmationRequired)
         XCTAssertEqual(pendingApprovals.count, 1)
         XCTAssertEqual(auditEntries.count, 1)
         XCTAssertEqual(auditEntries.first?.outcome, .confirmationRequired)
         XCTAssertTrue(auditEntries.first?.message.contains("Queued for approval") == true)
-        let executedRequests = await harness.executor.executedRequests()
         XCTAssertTrue(executedRequests.isEmpty)
     }
 
@@ -40,13 +40,54 @@ final class CommandBusTests: XCTestCase {
         )
 
         let auditEntries = try await harness.auditStore.recent(limit: 10)
-        let executedRequests = await harness.executor.executedRequests()
+        let executedRequests = await harness.recorder.executedRequests()
 
-        XCTAssertEqual(approved.outcome, ActionOutcome.success)
+        XCTAssertEqual(approved.outcome, .success)
         XCTAssertEqual(executedRequests, [request])
         XCTAssertEqual(auditEntries.count, 2)
         XCTAssertEqual(auditEntries.first?.outcome, .confirmationRequired)
         XCTAssertEqual(auditEntries.last?.outcome, .success)
+    }
+
+    func testApprovalPreparingExecutorFreezesRequestBeforeQueueingAndReplay() async throws {
+        let recorder = RequestRecorder()
+        let executor = RecordingExecutor(
+            recorder: recorder,
+            preparedArguments: [
+                "targetID": .string("frozen-target-id"),
+                "sessionID": .string("session-frozen"),
+                "snapshotID": .string("snapshot-frozen"),
+            ]
+        )
+        let harness = try TestHarness(executor: executor, recorder: recorder)
+        let request = ActionRequest(
+            action: .uiAct,
+            arguments: [
+                "app": .string("WhatsApp"),
+                "query": .string("iOS Dump"),
+            ],
+            origin: RequestOrigin(kind: .cli)
+        )
+
+        let queued = await harness.bus.dispatch(request)
+        let approvalID = try XCTUnwrap(queued.payload?.objectValue?["approvalID"]?.stringValue)
+        let pendingApprovals = await harness.bus.pendingApprovals()
+        let preparedRequest = try XCTUnwrap(pendingApprovals.first?.request)
+
+        let approved = await harness.bus.resolveApproval(
+            id: try XCTUnwrap(UUID(uuidString: approvalID)),
+            decision: .approve
+        )
+        let executedRequests = await harness.recorder.executedRequests()
+        let replayedRequest = try XCTUnwrap(executedRequests.first)
+
+        XCTAssertEqual(approved.outcome, .success)
+        XCTAssertEqual(executedRequests.count, 1)
+        XCTAssertEqual(preparedRequest.arguments["query"]?.stringValue, "iOS Dump")
+        XCTAssertEqual(preparedRequest.arguments["targetID"]?.stringValue, "frozen-target-id")
+        XCTAssertEqual(preparedRequest.arguments["sessionID"]?.stringValue, "session-frozen")
+        XCTAssertEqual(preparedRequest.arguments["snapshotID"]?.stringValue, "snapshot-frozen")
+        XCTAssertEqual(replayedRequest.arguments, preparedRequest.arguments)
     }
 
     func testTrustedAutomationSessionBypassesApprovalForAllowedAction() async throws {
@@ -67,7 +108,7 @@ final class CommandBusTests: XCTestCase {
         )
 
         let result = await harness.bus.dispatch(request)
-        let executedRequests = await harness.executor.executedRequests()
+        let executedRequests = await harness.recorder.executedRequests()
 
         XCTAssertEqual(result.outcome, .success)
         XCTAssertEqual(executedRequests, [request])
@@ -100,25 +141,31 @@ final class CommandBusTests: XCTestCase {
 private struct TestHarness {
     let bus: CommandBus
     let auditStore: AuditStore
-    let executor: RecordingExecutor
+    let recorder: RequestRecorder
     let trustedSessionStore: TrustedAutomationSessionStore
 
-    init() throws {
+    init(
+        executor: (any ActionExecutor)? = nil,
+        recorder: RequestRecorder? = nil
+    ) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wizmac-core-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
+        let resolvedRecorder = recorder ?? RequestRecorder()
+        let resolvedExecutor = executor ?? RecordingExecutor(recorder: resolvedRecorder)
+
         let settingsStore = try SettingsStore(url: directory.appendingPathComponent("settings.json"))
         self.auditStore = try AuditStore(url: directory.appendingPathComponent("audit.jsonl"))
         let approvalStore = try ApprovalStore(url: directory.appendingPathComponent("approvals.json"))
-        self.executor = RecordingExecutor()
+        self.recorder = resolvedRecorder
         self.trustedSessionStore = TrustedAutomationSessionStore()
         let policy = ApprovalPolicy(
             settingsStore: settingsStore,
             trustedSessionStore: trustedSessionStore
         )
         self.bus = CommandBus(
-            executor: executor,
+            executor: resolvedExecutor,
             auditStore: auditStore,
             approvalStore: approvalStore,
             approvalPolicy: policy
@@ -126,20 +173,51 @@ private struct TestHarness {
     }
 }
 
-private actor RecordingExecutor: ActionExecutor {
+private actor RequestRecorder {
     private var requests: [ActionRequest] = []
 
-    func execute(_ request: ActionRequest) async -> ActionResult {
+    func append(_ request: ActionRequest) {
         requests.append(request)
+    }
+
+    func executedRequests() -> [ActionRequest] {
+        requests
+    }
+}
+
+private actor RecordingExecutor: ApprovalPreparingActionExecutor {
+    private let recorder: RequestRecorder
+    private let preparedArguments: [String: JSONValue]
+
+    init(recorder: RequestRecorder, preparedArguments: [String: JSONValue] = [:]) {
+        self.recorder = recorder
+        self.preparedArguments = preparedArguments
+    }
+
+    func prepareForApproval(_ request: ActionRequest) async -> ActionRequest {
+        guard preparedArguments.isEmpty == false else { return request }
+
+        var mergedArguments = request.arguments
+        for (key, value) in preparedArguments {
+            mergedArguments[key] = value
+        }
+
+        return ActionRequest(
+            id: request.id,
+            action: request.action,
+            arguments: mergedArguments,
+            origin: request.origin,
+            createdAt: request.createdAt
+        )
+    }
+
+    func execute(_ request: ActionRequest) async -> ActionResult {
+        await recorder.append(request)
         return ActionResult(
             requestID: request.id,
             action: request.action,
             outcome: .success,
             message: "Executed \(request.action.rawValue)."
         )
-    }
-
-    func executedRequests() -> [ActionRequest] {
-        requests
     }
 }
