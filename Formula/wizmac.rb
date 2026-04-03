@@ -4,7 +4,7 @@ class Wizmac < Formula
   license "MIT"
   head "https://github.com/tanmayg1502/wizmac.git", branch: "main"
 
-  depends_on macos: :ventura
+  depends_on macos: ">= :ventura"
 
   def install
     system "swift", "build", "--configuration", "release", "--product", "wizmac"

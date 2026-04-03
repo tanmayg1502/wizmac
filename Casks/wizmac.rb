@@ -8,7 +8,7 @@ cask "wizmac" do
   homepage "https://github.com/tanmayg1502/wizmac"
 
   auto_updates true
-  depends_on macos: :ventura
+  depends_on macos: ">= :ventura"
 
   app "Wizmac.app"
   binary "#{appdir}/Wizmac.app/Contents/Resources/bin/wizmac",
