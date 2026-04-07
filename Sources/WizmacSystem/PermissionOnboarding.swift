@@ -3,13 +3,18 @@ import ApplicationServices
 import Foundation
 import WizmacCore
 
-struct PermissionOnboardingOutcome: Sendable, Equatable {
-    var outcome: ActionOutcome
-    var message: String
+public struct PermissionOnboardingOutcome: Sendable, Equatable {
+    public var outcome: ActionOutcome
+    public var message: String
+
+    public init(outcome: ActionOutcome, message: String) {
+        self.outcome = outcome
+        self.message = message
+    }
 }
 
-enum PermissionOnboardingController {
-    static func perform(permissionID: String, operation: String?) async -> PermissionOnboardingOutcome {
+public enum PermissionOnboardingController {
+    public static func perform(permissionID: String, operation: String?) async -> PermissionOnboardingOutcome {
         await MainActor.run {
             performOnMainActor(permissionID: permissionID, operation: operation)
         }

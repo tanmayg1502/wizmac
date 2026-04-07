@@ -2,6 +2,7 @@ import Foundation
 import ServiceManagement
 import WizmacControlPlane
 import WizmacCore
+import WizmacSystem
 
 protocol LaunchAtLoginControlling {
     var isSupported: Bool { get }
@@ -75,18 +76,31 @@ private enum LaunchAtLoginControllerFactory {
     }
 }
 
+protocol PermissionOnboardingHandling: Sendable {
+    func perform(permissionID: String, operation: String?) async -> PermissionOnboardingOutcome
+}
+
+private struct LocalPermissionOnboardingHandler: PermissionOnboardingHandling {
+    func perform(permissionID: String, operation: String?) async -> PermissionOnboardingOutcome {
+        await PermissionOnboardingController.perform(permissionID: permissionID, operation: operation)
+    }
+}
+
 actor LiveMenuBarBackend: MenuBarBackend {
     private let client: WizmacServiceClient
     private let launchAtLoginController: any LaunchAtLoginControlling
+    private let permissionOnboardingHandler: any PermissionOnboardingHandling
     private var lastPairing: RemotePairingSummary?
     private var launchAtLoginLastError: String?
 
     init(
         client: WizmacServiceClient = WizmacServiceClient(sourceKind: .menuBar),
-        launchAtLoginController: any LaunchAtLoginControlling = LaunchAtLoginControllerFactory.makeDefault()
+        launchAtLoginController: any LaunchAtLoginControlling = LaunchAtLoginControllerFactory.makeDefault(),
+        permissionOnboardingHandler: any PermissionOnboardingHandling = LocalPermissionOnboardingHandler()
     ) throws {
         self.client = client
         self.launchAtLoginController = launchAtLoginController
+        self.permissionOnboardingHandler = permissionOnboardingHandler
     }
 
     static func makeDefault() -> any MenuBarBackend {
@@ -150,39 +164,18 @@ actor LiveMenuBarBackend: MenuBarBackend {
     func requestMissingPermissions() async -> MenuBarSnapshot {
         let snapshot = await loadSnapshot()
         for permission in snapshot.missingPromptablePermissions {
-            _ = try? await client.callTool(
-                named: "system.permissions_request",
-                arguments: [
-                    "permission": .string(permission.id),
-                    "operation": .string("prompt"),
-                ],
-                source: ControlPlaneSource(kind: .menuBar)
-            )
+            _ = await permissionOnboardingHandler.perform(permissionID: permission.id, operation: "prompt")
         }
         return await loadSnapshot()
     }
 
     func requestPermission(id: String) async -> MenuBarSnapshot {
-        _ = try? await client.callTool(
-            named: "system.permissions_request",
-            arguments: [
-                "permission": .string(id),
-                "operation": .string("prompt"),
-            ],
-            source: ControlPlaneSource(kind: .menuBar)
-        )
+        _ = await permissionOnboardingHandler.perform(permissionID: id, operation: "prompt")
         return await loadSnapshot()
     }
 
     func openPermissionSettings(id: String) async -> MenuBarSnapshot {
-        _ = try? await client.callTool(
-            named: "system.permissions_request",
-            arguments: [
-                "permission": .string(id),
-                "operation": .string("open_settings"),
-            ],
-            source: ControlPlaneSource(kind: .menuBar)
-        )
+        _ = await permissionOnboardingHandler.perform(permissionID: id, operation: "open_settings")
         return await loadSnapshot()
     }
 
