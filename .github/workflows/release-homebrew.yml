@@ -40,6 +40,21 @@ jobs:
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Require signed notarized releases for tags
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          missing=0
+          for name in DEVELOPER_ID_APPLICATION MACOS_SIGNING_CERT_BASE64 MACOS_SIGNING_CERT_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Tagged Homebrew releases must be Developer ID signed and notarized, otherwise macOS will block the app." >&2
+            exit 1
+          fi
+
       - name: Import Developer ID certificate
         if: ${{ env.MACOS_SIGNING_CERT_BASE64 != '' && env.MACOS_SIGNING_CERT_PASSWORD != '' }}
         env:

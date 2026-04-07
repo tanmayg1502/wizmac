@@ -1,5 +1,6 @@
 import XCTest
 @testable import WizmacMenuBarApp
+import WizmacCore
 
 @MainActor
 final class MenuBarViewModelTests: XCTestCase {
@@ -180,6 +181,55 @@ final class MenuBarViewModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(viewModel.snapshot.recentAudit.first?.title, "Opened Settings")
+    }
+
+    func testCompleteSetupMarksOnboardingFinished() async throws {
+        let backend = PreviewMenuBarBackend(
+            snapshot: MenuBarSnapshot(
+                permissions: [
+                    PermissionStatus(
+                        id: "accessibility",
+                        title: "Accessibility",
+                        detail: "Required for control.",
+                        state: .granted
+                    ),
+                    PermissionStatus(
+                        id: "screen_recording",
+                        title: "Screen Recording",
+                        detail: "Required for inspection.",
+                        state: .granted
+                    ),
+                    PermissionStatus(
+                        id: "automation_music",
+                        title: "Automation",
+                        detail: "Needed for Apple Music.",
+                        state: .limited
+                    ),
+                ],
+                onboardingState: OnboardingState(
+                    accessibilityPrompted: true,
+                    screenRecordingPrompted: true,
+                    automationPrompted: true,
+                    completedAt: nil
+                ),
+                serverState: ServerControlState(
+                    localControlPlaneRunning: true,
+                    remoteHTTPRunning: false
+                ),
+                recentAudit: [],
+                pendingApprovals: []
+            )
+        )
+        let viewModel = MenuBarViewModel(backend: backend)
+
+        await viewModel.load()
+        XCTAssertTrue(viewModel.snapshot.canFinishSetup)
+
+        viewModel.completeSetup()
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertNotNil(viewModel.snapshot.onboardingState.completedAt)
+        XCTAssertEqual(viewModel.snapshot.recentAudit.first?.title, "Completed setup")
     }
 
     func testTrustedAutomationSessionCanStartAndEnd() async throws {

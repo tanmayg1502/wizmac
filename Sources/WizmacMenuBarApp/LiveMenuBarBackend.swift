@@ -165,17 +165,35 @@ actor LiveMenuBarBackend: MenuBarBackend {
         let snapshot = await loadSnapshot()
         for permission in snapshot.missingPromptablePermissions {
             _ = await permissionOnboardingHandler.perform(permissionID: permission.id, operation: "prompt")
+            await markOnboardingProgress(for: permission.id, prompted: true)
         }
         return await loadSnapshot()
     }
 
     func requestPermission(id: String) async -> MenuBarSnapshot {
         _ = await permissionOnboardingHandler.perform(permissionID: id, operation: "prompt")
+        await markOnboardingProgress(for: id, prompted: true)
         return await loadSnapshot()
     }
 
     func openPermissionSettings(id: String) async -> MenuBarSnapshot {
         _ = await permissionOnboardingHandler.perform(permissionID: id, operation: "open_settings")
+        await markOnboardingProgress(for: id, prompted: true)
+        return await loadSnapshot()
+    }
+
+    func completeSetup() async -> MenuBarSnapshot {
+        _ = try? await client.updateSettings(
+            WizmacSettingsPatch(
+                onboardingState: OnboardingState(
+                    accessibilityPrompted: true,
+                    screenRecordingPrompted: true,
+                    automationPrompted: true,
+                    inputMonitoringPrompted: false,
+                    completedAt: .now
+                )
+            )
+        )
         return await loadSnapshot()
     }
 
@@ -240,6 +258,7 @@ actor LiveMenuBarBackend: MenuBarBackend {
 
         return MenuBarSnapshot(
             permissions: loadPermissions(from: serviceSnapshot.permissions),
+            onboardingState: serviceSnapshot.settings.onboardingState,
             serverState: ServerControlState(
                 localControlPlaneRunning: serviceSnapshot.settings.interfaces["cli"] ?? true,
                 remoteHTTPRunning: serviceSnapshot.health.remoteEnabled,
@@ -268,6 +287,41 @@ actor LiveMenuBarBackend: MenuBarBackend {
                     requiresConfirmation: true
                 )
             }
+        )
+    }
+
+    private func markOnboardingProgress(for permissionID: String, prompted: Bool) async {
+        guard prompted else {
+            return
+        }
+
+        let snapshot = try? await client.snapshot()
+        let currentState = snapshot?.settings.onboardingState ?? OnboardingState()
+        let permissions = loadPermissions(from: snapshot?.permissions ?? [])
+
+        var nextState = currentState
+        switch permissionID {
+        case "accessibility":
+            nextState.accessibilityPrompted = true
+        case "screen_recording":
+            nextState.screenRecordingPrompted = true
+        case "automation_music":
+            nextState.automationPrompted = true
+        default:
+            break
+        }
+
+        let requiredGranted = permissions.first(where: { $0.id == "accessibility" })?.isGranted == true
+            && permissions.first(where: { $0.id == "screen_recording" })?.isGranted == true
+
+        if requiredGranted && nextState.automationPrompted {
+            nextState.completedAt = currentState.completedAt ?? .now
+        } else if currentState.completedAt == nil {
+            nextState.completedAt = nil
+        }
+
+        _ = try? await client.updateSettings(
+            WizmacSettingsPatch(onboardingState: nextState)
         )
     }
 

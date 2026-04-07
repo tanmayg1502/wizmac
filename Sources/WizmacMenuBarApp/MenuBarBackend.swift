@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import WizmacCore
 
 protocol MenuBarBackend: Sendable {
     func snapshot() async -> MenuBarSnapshot
@@ -10,6 +11,7 @@ protocol MenuBarBackend: Sendable {
     func requestMissingPermissions() async -> MenuBarSnapshot
     func requestPermission(id: String) async -> MenuBarSnapshot
     func openPermissionSettings(id: String) async -> MenuBarSnapshot
+    func completeSetup() async -> MenuBarSnapshot
     func startTrustedAutomationSession() async -> MenuBarSnapshot
     func endTrustedAutomationSession() async -> MenuBarSnapshot
     func pairRemoteClient(named name: String?) async -> MenuBarSnapshot
@@ -102,6 +104,15 @@ actor PreviewMenuBarBackend: MenuBarBackend {
             detail: permission.map { "Prompted for \($0.title) in preview mode." }
                 ?? "Prompted for \(id) in preview mode."
         )
+        switch id {
+        case "accessibility":
+            snapshotValue.onboardingState.accessibilityPrompted = true
+        case "screen_recording":
+            snapshotValue.onboardingState.screenRecordingPrompted = true
+        default:
+            break
+        }
+        snapshotValue.onboardingState.completedAt = snapshotValue.canFinishSetup ? .now : nil
         return snapshotValue
     }
 
@@ -111,6 +122,26 @@ actor PreviewMenuBarBackend: MenuBarBackend {
             title: "Opened Settings",
             detail: permission.map { "Opened \($0.title) settings in preview mode." }
                 ?? "Opened settings for \(id) in preview mode."
+        )
+        switch id {
+        case "automation_music":
+            snapshotValue.onboardingState.automationPrompted = true
+        case "accessibility":
+            snapshotValue.onboardingState.accessibilityPrompted = true
+        case "screen_recording":
+            snapshotValue.onboardingState.screenRecordingPrompted = true
+        default:
+            break
+        }
+        snapshotValue.onboardingState.completedAt = snapshotValue.canFinishSetup ? .now : nil
+        return snapshotValue
+    }
+
+    func completeSetup() async -> MenuBarSnapshot {
+        snapshotValue.onboardingState.completedAt = .now
+        appendAudit(
+            title: "Completed setup",
+            detail: "Preview mode marked the first-run setup checklist complete."
         )
         return snapshotValue
     }
@@ -231,6 +262,7 @@ actor PreviewMenuBarBackend: MenuBarBackend {
                 state: .missing
             )
         ],
+        onboardingState: OnboardingState(),
         serverState: ServerControlState(
             localControlPlaneRunning: true,
             remoteHTTPRunning: false,
@@ -345,6 +377,12 @@ final class MenuBarViewModel: ObservableObject {
     func openPermissionSettings(_ id: String) {
         Task {
             snapshot = await backend.openPermissionSettings(id: id)
+        }
+    }
+
+    func completeSetup() {
+        Task {
+            snapshot = await backend.completeSetup()
         }
     }
 

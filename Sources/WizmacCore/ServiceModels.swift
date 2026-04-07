@@ -259,7 +259,7 @@ public struct MediaStreamSessionState: Codable, Equatable, Sendable {
     }
 }
 
-public struct OnboardingState: Codable, Equatable, Sendable {
+public struct OnboardingState: Codable, Equatable, Hashable, Sendable {
     public var accessibilityPrompted: Bool
     public var screenRecordingPrompted: Bool
     public var automationPrompted: Bool

@@ -1,4 +1,5 @@
 import Foundation
+import WizmacCore
 
 enum PermissionState: String, CaseIterable, Codable, Sendable {
     case granted
@@ -19,14 +20,28 @@ extension PermissionStatus {
         state == .missing
     }
 
+    var isGranted: Bool {
+        state == .granted
+    }
+
     var supportsPrompting: Bool {
         switch id {
-        case "accessibility", "screen_recording":
+        case "accessibility", "screen_recording", "automation_music":
             return true
         default:
             return false
         }
     }
+}
+
+struct SetupChecklistItem: Identifiable, Hashable, Sendable {
+    let id: String
+    var title: String
+    var detail: String
+    var state: PermissionState
+    var actionTitle: String
+    var secondaryActionTitle: String?
+    var isComplete: Bool
 }
 
 struct ServerControlState: Codable, Hashable, Sendable {
@@ -100,6 +115,7 @@ enum LaunchAtLoginState: String, Codable, Hashable, Sendable {
 
 struct MenuBarSnapshot: Codable, Hashable, Sendable {
     var permissions: [PermissionStatus]
+    var onboardingState: OnboardingState
     var serverState: ServerControlState
     var launchAtLoginEnabled: Bool
     var launchAtLoginSupported: Bool
@@ -116,6 +132,7 @@ struct MenuBarSnapshot: Codable, Hashable, Sendable {
 
     init(
         permissions: [PermissionStatus],
+        onboardingState: OnboardingState = OnboardingState(),
         serverState: ServerControlState,
         launchAtLoginEnabled: Bool = false,
         launchAtLoginSupported: Bool = false,
@@ -131,6 +148,7 @@ struct MenuBarSnapshot: Codable, Hashable, Sendable {
         pendingApprovals: [ApprovalRequestSummary]
     ) {
         self.permissions = permissions
+        self.onboardingState = onboardingState
         self.serverState = serverState
         self.launchAtLoginEnabled = launchAtLoginEnabled
         self.launchAtLoginSupported = launchAtLoginSupported
@@ -148,6 +166,7 @@ struct MenuBarSnapshot: Codable, Hashable, Sendable {
 
     static let empty = MenuBarSnapshot(
         permissions: [],
+        onboardingState: OnboardingState(),
         serverState: ServerControlState(
             localControlPlaneRunning: false,
             remoteHTTPRunning: false
@@ -165,12 +184,82 @@ struct MenuBarSnapshot: Codable, Hashable, Sendable {
 }
 
 extension MenuBarSnapshot {
+    var accessibilityPermission: PermissionStatus? {
+        permissions.first(where: { $0.id == "accessibility" })
+    }
+
+    var screenRecordingPermission: PermissionStatus? {
+        permissions.first(where: { $0.id == "screen_recording" })
+    }
+
+    var automationPermission: PermissionStatus? {
+        permissions.first(where: { $0.id == "automation_music" })
+    }
+
     var missingPromptablePermissions: [PermissionStatus] {
         permissions.filter { $0.isMissing && $0.supportsPrompting }
     }
 
     var needsPermissionOnboarding: Bool {
-        missingPromptablePermissions.isEmpty == false
+        requiredPermissionsGranted == false || onboardingState.automationPrompted == false
+    }
+
+    var requiredPermissionsGranted: Bool {
+        accessibilityPermission?.isGranted == true && screenRecordingPermission?.isGranted == true
+    }
+
+    var shouldPresentSetupWindowOnLaunch: Bool {
+        onboardingState.completedAt == nil || requiredPermissionsGranted == false
+    }
+
+    var canFinishSetup: Bool {
+        requiredPermissionsGranted && onboardingState.automationPrompted
+    }
+
+    var setupChecklist: [SetupChecklistItem] {
+        [
+            SetupChecklistItem(
+                id: "accessibility",
+                title: "Accessibility",
+                detail: accessibilityPermission?.detail ?? "Required for keyboard, clicks, focus, and scroll control.",
+                state: accessibilityPermission?.state ?? .missing,
+                actionTitle: "Prompt",
+                secondaryActionTitle: "Open Settings",
+                isComplete: accessibilityPermission?.isGranted == true
+            ),
+            SetupChecklistItem(
+                id: "screen_recording",
+                title: "Screen Recording",
+                detail: screenRecordingPermission?.detail ?? "Required for richer UI and window inspection. You may need to relaunch Wizmac after enabling it.",
+                state: screenRecordingPermission?.state ?? .missing,
+                actionTitle: "Prompt",
+                secondaryActionTitle: "Open Settings",
+                isComplete: screenRecordingPermission?.isGranted == true
+            ),
+            SetupChecklistItem(
+                id: "automation_music",
+                title: "Automation",
+                detail: onboardingState.automationPrompted
+                    ? "Automation settings were opened. macOS will ask again the first time Wizmac controls Music."
+                    : "Open Automation settings now so Wizmac is ready when you use Apple Music controls later.",
+                state: onboardingState.automationPrompted ? .granted : .unknown,
+                actionTitle: "Open Settings",
+                secondaryActionTitle: nil,
+                isComplete: onboardingState.automationPrompted
+            ),
+        ]
+    }
+
+    var setupSummary: String {
+        if canFinishSetup {
+            return "Everything important is ready. Finish setup to stop showing this first-run checklist."
+        }
+
+        if requiredPermissionsGranted == false {
+            return "Grant Accessibility and Screen Recording so Wizmac can search UI, move focus, click, and inspect windows."
+        }
+
+        return "Open Automation once so the app can guide you through the last optional permission when you need Music control."
     }
 
     var hasTrustedAutomationSession: Bool {

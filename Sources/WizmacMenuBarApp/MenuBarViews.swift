@@ -52,8 +52,8 @@ struct MenuBarDashboardView: View {
     private var permissionOnboarding: some View {
         if viewModel.snapshot.needsPermissionOnboarding {
             GroupBox("Finish Setup") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Wizmac still needs macOS permission before it can search UI, move focus, click, or scroll for you.")
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(viewModel.snapshot.setupSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -69,32 +69,43 @@ struct MenuBarDashboardView: View {
                             }
                         }
                         .buttonStyle(.bordered)
+
+                        if viewModel.snapshot.canFinishSetup {
+                            Button("Finish Setup") {
+                                viewModel.completeSetup()
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
 
                     Text("macOS still requires you to click Allow. Screen Recording may need a relaunch before Wizmac sees the new access.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    ForEach(viewModel.snapshot.missingPromptablePermissions) { permission in
+                    ForEach(viewModel.snapshot.setupChecklist) { item in
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(alignment: .firstTextBaseline) {
-                                Text(permission.title)
+                                Text(item.title)
                                     .font(.subheadline.weight(.semibold))
+
+                                statusPill(for: item)
 
                                 Spacer()
 
-                                Button("Prompt") {
-                                    viewModel.requestPermission(permission.id)
+                                Button(item.actionTitle) {
+                                    runSetupAction(for: item.id, primary: true)
                                 }
                                 .buttonStyle(.borderedProminent)
 
-                                Button("Open Settings") {
-                                    viewModel.openPermissionSettings(permission.id)
+                                if let secondaryActionTitle = item.secondaryActionTitle {
+                                    Button(secondaryActionTitle) {
+                                        runSetupAction(for: item.id, primary: false)
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-                                .buttonStyle(.bordered)
                             }
 
-                            Text(permission.detail)
+                            Text(item.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -103,6 +114,29 @@ struct MenuBarDashboardView: View {
                 }
             }
         }
+    }
+
+    private func runSetupAction(for id: String, primary: Bool) {
+        switch (id, primary) {
+        case ("automation_music", _):
+            viewModel.openPermissionSettings(id)
+        case (_, true):
+            viewModel.requestPermission(id)
+        case (_, false):
+            viewModel.openPermissionSettings(id)
+        }
+    }
+
+    private func statusPill(for item: SetupChecklistItem) -> some View {
+        Text(item.isComplete ? "Ready" : "Needs Setup")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(item.isComplete ? Color.green : Color.orange)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill((item.isComplete ? Color.green : Color.orange).opacity(0.12))
+            )
     }
 
     private var serverControls: some View {

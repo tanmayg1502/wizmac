@@ -78,6 +78,8 @@ The intended release flow is:
 3. Publish `Wizmac.zip` as the GitHub release asset that `Casks/wizmac.rb` points at.
 4. Keep `Formula/wizmac.rb` for power users who prefer a source build and `brew services`.
 
+Tagged releases must be signed and notarized. If they are not, macOS may show a dialog saying it could not verify Wizmac and offer only `Move to Trash`.
+
 This repo also includes [.github/workflows/release-homebrew.yml](../.github/workflows/release-homebrew.yml), which automates the same flow on tag pushes when the signing and notarization secrets are configured.
 
 ## Validation
