@@ -1104,6 +1104,132 @@ public struct ControlPlaneToolRegistry: Sendable {
             schemaProperties: ["clientID": .string("string"), "fingerprint": .string("string")],
             requiresConfirmation: true
         ),
+        // ── iOS / iPadOS Physical Device Control ──────────────────────────────
+        // Requires idb (Meta iOS Device Bridge): brew install idb-companion
+        // WiFi usage: enable Developer Mode on device, then ios.connect host=<device-ip>
+        .schemaBacked(
+            name: "ios.connect",
+            title: "Connect iOS Device over WiFi",
+            description: "Connect to an iOS/iPadOS device or idb_companion over WiFi. Pass the device's IP address and optional port (default 27015). After connecting, all other ios.* tools work wirelessly. Requires Developer Mode enabled on the device (Settings > Privacy & Security > Developer Mode).",
+            schemaProperties: [
+                "host": .string("string"),
+                "port": .string("number"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.disconnect",
+            title: "Disconnect iOS Device",
+            description: "Disconnect a wirelessly connected iOS/iPadOS device by UDID. Use ios.devices to find the UDID first.",
+            schemaProperties: [
+                "udid": .string("string"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.devices",
+            title: "List iOS Devices",
+            description: "List all physically connected iOS and iPadOS devices with their UDID, name, OS version, and state. Requires a USB-connected device trusted on this Mac.",
+            schemaProperties: [:]
+        ),
+        .schemaBacked(
+            name: "ios.screenshot",
+            title: "iOS Screenshot",
+            description: "Capture a screenshot from a connected iOS/iPadOS device and save it to a local path. Pass udid to target a specific device; omit to use the first connected device.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "path": .string("string"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.accessibility",
+            title: "iOS Accessibility Tree",
+            description: "Fetch the full UI accessibility tree from a connected iOS/iPadOS device as JSON. Use this to discover element positions before tapping.",
+            schemaProperties: [
+                "udid": .string("string"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.apps",
+            title: "List iOS Apps",
+            description: "List all installed apps on a connected iOS/iPadOS device, including bundle ID, display name, and install type.",
+            schemaProperties: [
+                "udid": .string("string"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.tap",
+            title: "iOS Tap",
+            description: "Tap at a point (x, y) in screen coordinates on a connected iOS/iPadOS device. Use ios.accessibility first to discover element positions.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "x": .string("number"),
+                "y": .string("number"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.swipe",
+            title: "iOS Swipe",
+            description: "Swipe from (x1, y1) to (x2, y2) on a connected iOS/iPadOS device. Optional durationMs controls swipe speed (default 300ms).",
+            schemaProperties: [
+                "udid": .string("string"),
+                "x1": .string("number"),
+                "y1": .string("number"),
+                "x2": .string("number"),
+                "y2": .string("number"),
+                "durationMs": .string("number"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.type",
+            title: "iOS Type Text",
+            description: "Type text into the currently focused element on a connected iOS/iPadOS device. The on-screen keyboard must be visible or a text field focused.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "text": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.button",
+            title: "iOS Press Button",
+            description: "Press a hardware button on a connected iOS/iPadOS device. Options: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY, VOLUME_UP, VOLUME_DOWN.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "button": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.launch",
+            title: "iOS Launch App",
+            description: "Launch an app by bundle ID on a connected iOS/iPadOS device. Use ios.apps to discover installed bundle IDs.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "bundleID": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.terminate",
+            title: "iOS Terminate App",
+            description: "Terminate a running app by bundle ID on a connected iOS/iPadOS device.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "bundleID": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
+        .schemaBacked(
+            name: "ios.url",
+            title: "iOS Open URL",
+            description: "Open a URL (including custom app scheme URLs) on a connected iOS/iPadOS device.",
+            schemaProperties: [
+                "udid": .string("string"),
+                "url": .string("string"),
+            ],
+            requiresConfirmation: true
+        ),
     ])
 }
 

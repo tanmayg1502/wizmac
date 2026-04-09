@@ -204,6 +204,32 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
                 outcome: .unsupported,
                 message: "Confirmation status is served directly by the command bus."
             )
+        case .iosDevices:
+            return await iosDevicesResult(for: request)
+        case .iosConnect:
+            return await iosConnectResult(for: request)
+        case .iosDisconnect:
+            return await iosDisconnectResult(for: request)
+        case .iosScreenshot:
+            return await iosScreenshotResult(for: request)
+        case .iosAccessibility:
+            return await iosAccessibilityResult(for: request)
+        case .iosApps:
+            return await iosAppsResult(for: request)
+        case .iosTap:
+            return await iosTapResult(for: request)
+        case .iosSwipe:
+            return await iosSwipeResult(for: request)
+        case .iosType:
+            return await iosTypeResult(for: request)
+        case .iosButton:
+            return await iosButtonResult(for: request)
+        case .iosLaunch:
+            return await iosLaunchResult(for: request)
+        case .iosTerminate:
+            return await iosTerminateResult(for: request)
+        case .iosUrl:
+            return await iosUrlResult(for: request)
         }
     }
 
@@ -4695,5 +4721,264 @@ private extension ActionRequest {
             origin: origin,
             createdAt: createdAt
         )
+    }
+}
+
+// MARK: - iOS / iPadOS Device Control
+
+extension MacAutomationExecutor {
+    private var iosBridge: IOSDeviceBridge { IOSDeviceBridge(shellRunner: shellRunner) }
+
+    // Resolves the udid to use: explicit arg > first connected device.
+    private func resolveUDID(from request: ActionRequest) async -> Result<String, IOSBridgeError> {
+        if let explicit = request.string(for: "udid"), !explicit.isEmpty {
+            return .success(explicit)
+        }
+        let result = await iosBridge.listDevices()
+        switch result {
+        case .failure(let err): return .failure(err)
+        case .success(let devices):
+            guard let first = devices.first else { return .failure(.noDeviceFound) }
+            return .success(first.udid)
+        }
+    }
+
+    func iosConnectResult(for request: ActionRequest) async -> ActionResult {
+        guard let host = request.string(for: "host") else {
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .invalidRequest,
+                message: "Missing required argument: host (IP address of the device or Mac running idb_companion)."
+            )
+        }
+        let port = request.int(for: "port") ?? 27015
+        switch await iosBridge.connect(host: host, port: port) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription)
+        case .success(let message):
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .success,
+                message: message,
+                payload: .object(["host": .string(host), "port": .number(Double(port))])
+            )
+        }
+    }
+
+    func iosDisconnectResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        switch await iosBridge.disconnect(udid: udid) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription)
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Disconnected \(udid).")
+        }
+    }
+
+    func iosDevicesResult(for request: ActionRequest) async -> ActionResult {
+        switch await iosBridge.listDevices() {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Failed to list devices.")
+        case .success(let devices):
+            let payload: JSONValue = .array(devices.map { d in
+                .object([
+                    "udid": .string(d.udid),
+                    "name": .string(d.name),
+                    "osVersion": .string(d.osVersion),
+                    "state": .string(d.state),
+                ])
+            })
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Found \(devices.count) physical device(s).", payload: payload)
+        }
+    }
+
+    func iosScreenshotResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        let path = request.string(for: "path") ?? "/tmp/wizmac-ios-screenshot-\(UUID().uuidString).png"
+        switch await iosBridge.screenshot(udid: udid, outputPath: path) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Screenshot failed.")
+        case .success(let saved):
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .success,
+                message: "Screenshot saved to \(saved).",
+                payload: .object(["path": .string(saved), "udid": .string(udid)])
+            )
+        }
+    }
+
+    func iosAccessibilityResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        switch await iosBridge.accessibilityTree(udid: udid) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Failed to fetch accessibility tree.")
+        case .success(let tree):
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .success,
+                message: "Accessibility tree fetched.",
+                payload: .object(["udid": .string(udid), "tree": .string(tree)])
+            )
+        }
+    }
+
+    func iosAppsResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        switch await iosBridge.listApps(udid: udid) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Failed to list apps.")
+        case .success(let apps):
+            let payload: JSONValue = .array(apps.map { a in
+                .object([
+                    "bundleID": .string(a.bundleID),
+                    "name": .string(a.name),
+                    "installType": .string(a.installType),
+                ])
+            })
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Found \(apps.count) app(s).", payload: payload)
+        }
+    }
+
+    func iosTapResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let x = request.arguments["x"]?.doubleValue, let y = request.arguments["y"]?.doubleValue else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required arguments: x, y.")
+        }
+        switch await iosBridge.tap(udid: udid, x: x, y: y) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Tap failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Tapped (\(x), \(y)) on \(udid).")
+        }
+    }
+
+    func iosSwipeResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard
+            let x1 = request.arguments["x1"]?.doubleValue,
+            let y1 = request.arguments["y1"]?.doubleValue,
+            let x2 = request.arguments["x2"]?.doubleValue,
+            let y2 = request.arguments["y2"]?.doubleValue
+        else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required arguments: x1, y1, x2, y2.")
+        }
+        let durationMs = request.int(for: "durationMs") ?? 300
+        switch await iosBridge.swipe(udid: udid, x1: x1, y1: y1, x2: x2, y2: y2, durationMs: durationMs) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Swipe failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Swiped (\(x1),\(y1)) → (\(x2),\(y2)) on \(udid).")
+        }
+    }
+
+    func iosTypeResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let text = request.string(for: "text") else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required argument: text.")
+        }
+        switch await iosBridge.typeText(udid: udid, text: text) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Type failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Typed \(text.count) character(s) on \(udid).")
+        }
+    }
+
+    func iosButtonResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let button = request.string(for: "button") else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required argument: button. Options: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY, VOLUME_UP, VOLUME_DOWN.")
+        }
+        switch await iosBridge.pressButton(udid: udid, button: button) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Button press failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Pressed \(button.uppercased()) on \(udid).")
+        }
+    }
+
+    func iosLaunchResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let bundleID = request.string(for: "bundleID") else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required argument: bundleID.")
+        }
+        switch await iosBridge.launch(udid: udid, bundleID: bundleID) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Launch failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Launched \(bundleID) on \(udid).")
+        }
+    }
+
+    func iosTerminateResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let bundleID = request.string(for: "bundleID") else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required argument: bundleID.")
+        }
+        switch await iosBridge.terminate(udid: udid, bundleID: bundleID) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Terminate failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Terminated \(bundleID) on \(udid).")
+        }
+    }
+
+    func iosUrlResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        guard let url = request.string(for: "url") else {
+            return ActionResult(requestID: request.id, action: request.action, outcome: .invalidRequest, message: "Missing required argument: url.")
+        }
+        switch await iosBridge.openURL(udid: udid, url: url) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription ?? "Open URL failed.")
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Opened \(url) on \(udid).")
+        }
+    }
+
+    private func iosBridgeFailure(_ request: ActionRequest, _ error: IOSBridgeError?) -> ActionResult {
+        ActionResult(
+            requestID: request.id,
+            action: request.action,
+            outcome: .failed,
+            message: error?.localizedDescription ?? "iOS bridge error."
+        )
+    }
+}
+
+private extension Result where Failure == IOSBridgeError {
+    var error: IOSBridgeError? {
+        if case .failure(let e) = self { return e }
+        return nil
     }
 }
