@@ -71,6 +71,47 @@ final class IOSDeviceBridge: @unchecked Sendable {
         }
     }
 
+    // MARK: - WiFi Connection Management
+
+    /// Connect to a device (or idb_companion) over the network.
+    /// host: IP address of the device or Mac running idb_companion.
+    /// port: idb_companion port (default 27015).
+    func connect(host: String, port: Int = 27015) async -> Result<String, IOSBridgeError> {
+        guard isIDBAvailable() else { return .failure(.idbNotFound(idbPath)) }
+        do {
+            let result = try await shellRunner.run(
+                launchPath: idbPath,
+                arguments: ["connect", "\(host):\(port)"],
+                timeout: 15.0
+            )
+            guard result.terminationStatus == 0 else {
+                return .failure(.commandFailed(result.stderr.isEmpty ? result.stdout : result.stderr))
+            }
+            let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .success(output.isEmpty ? "Connected to \(host):\(port)." : output)
+        } catch {
+            return .failure(.commandFailed(error.localizedDescription))
+        }
+    }
+
+    /// Disconnect a previously connected network device by UDID or host:port.
+    func disconnect(udid: String) async -> Result<Void, IOSBridgeError> {
+        guard isIDBAvailable() else { return .failure(.idbNotFound(idbPath)) }
+        do {
+            let result = try await shellRunner.run(
+                launchPath: idbPath,
+                arguments: ["disconnect", udid],
+                timeout: 10.0
+            )
+            guard result.terminationStatus == 0 else {
+                return .failure(.commandFailed(result.stderr.isEmpty ? result.stdout : result.stderr))
+            }
+            return .success(())
+        } catch {
+            return .failure(.commandFailed(error.localizedDescription))
+        }
+    }
+
     // MARK: - Screenshot
 
     func screenshot(udid: String, outputPath: String) async -> Result<String, IOSBridgeError> {

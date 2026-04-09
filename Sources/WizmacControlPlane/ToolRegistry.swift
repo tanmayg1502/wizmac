@@ -1106,6 +1106,24 @@ public struct ControlPlaneToolRegistry: Sendable {
         ),
         // ── iOS / iPadOS Physical Device Control ──────────────────────────────
         // Requires idb (Meta iOS Device Bridge): brew install idb-companion
+        // WiFi usage: enable Developer Mode on device, then ios.connect host=<device-ip>
+        .schemaBacked(
+            name: "ios.connect",
+            title: "Connect iOS Device over WiFi",
+            description: "Connect to an iOS/iPadOS device or idb_companion over WiFi. Pass the device's IP address and optional port (default 27015). After connecting, all other ios.* tools work wirelessly. Requires Developer Mode enabled on the device (Settings > Privacy & Security > Developer Mode).",
+            schemaProperties: [
+                "host": .string("string"),
+                "port": .string("number"),
+            ]
+        ),
+        .schemaBacked(
+            name: "ios.disconnect",
+            title: "Disconnect iOS Device",
+            description: "Disconnect a wirelessly connected iOS/iPadOS device by UDID. Use ios.devices to find the UDID first.",
+            schemaProperties: [
+                "udid": .string("string"),
+            ]
+        ),
         .schemaBacked(
             name: "ios.devices",
             title: "List iOS Devices",

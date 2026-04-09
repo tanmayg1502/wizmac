@@ -206,6 +206,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             )
         case .iosDevices:
             return await iosDevicesResult(for: request)
+        case .iosConnect:
+            return await iosConnectResult(for: request)
+        case .iosDisconnect:
+            return await iosDisconnectResult(for: request)
         case .iosScreenshot:
             return await iosScreenshotResult(for: request)
         case .iosAccessibility:
@@ -4736,6 +4740,39 @@ extension MacAutomationExecutor {
         case .success(let devices):
             guard let first = devices.first else { return .failure(.noDeviceFound) }
             return .success(first.udid)
+        }
+    }
+
+    func iosConnectResult(for request: ActionRequest) async -> ActionResult {
+        guard let host = request.string(for: "host") else {
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .invalidRequest,
+                message: "Missing required argument: host (IP address of the device or Mac running idb_companion)."
+            )
+        }
+        let port = request.int(for: "port") ?? 27015
+        switch await iosBridge.connect(host: host, port: port) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription)
+        case .success(let message):
+            return ActionResult(
+                requestID: request.id, action: request.action, outcome: .success,
+                message: message,
+                payload: .object(["host": .string(host), "port": .number(Double(port))])
+            )
+        }
+    }
+
+    func iosDisconnectResult(for request: ActionRequest) async -> ActionResult {
+        let udidResult = await resolveUDID(from: request)
+        guard case .success(let udid) = udidResult else {
+            return iosBridgeFailure(request, udidResult.error)
+        }
+        switch await iosBridge.disconnect(udid: udid) {
+        case .failure(let err):
+            return ActionResult(requestID: request.id, action: request.action, outcome: .failed, message: err.localizedDescription)
+        case .success:
+            return ActionResult(requestID: request.id, action: request.action, outcome: .success, message: "Disconnected \(udid).")
         }
     }
 

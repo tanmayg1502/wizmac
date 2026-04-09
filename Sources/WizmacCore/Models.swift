@@ -67,6 +67,8 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case remoteRevoke = "remote.revoke"
     // iOS / iPadOS physical device control (backed by idb)
     case iosDevices = "ios.devices"
+    case iosConnect = "ios.connect"
+    case iosDisconnect = "ios.disconnect"
     case iosScreenshot = "ios.screenshot"
     case iosAccessibility = "ios.accessibility"
     case iosApps = "ios.apps"
@@ -565,6 +567,8 @@ public extension ActionName {
         .remoteClients,
         .textMode,
         .iosDevices,
+        .iosConnect,
+        .iosDisconnect,
         .iosScreenshot,
         .iosAccessibility,
         .iosApps,
