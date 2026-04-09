@@ -65,6 +65,18 @@ public enum ActionName: String, Codable, CaseIterable, Sendable {
     case remotePair = "remote.pair"
     case remoteClients = "remote.clients"
     case remoteRevoke = "remote.revoke"
+    // iOS / iPadOS physical device control (backed by idb)
+    case iosDevices = "ios.devices"
+    case iosScreenshot = "ios.screenshot"
+    case iosAccessibility = "ios.accessibility"
+    case iosApps = "ios.apps"
+    case iosTap = "ios.tap"
+    case iosSwipe = "ios.swipe"
+    case iosType = "ios.type"
+    case iosButton = "ios.button"
+    case iosLaunch = "ios.launch"
+    case iosTerminate = "ios.terminate"
+    case iosUrl = "ios.url"
 }
 
 public enum ActionOutcome: String, Codable, Sendable {
@@ -552,6 +564,10 @@ public extension ActionName {
         .displayAirPlayDevices,
         .remoteClients,
         .textMode,
+        .iosDevices,
+        .iosScreenshot,
+        .iosAccessibility,
+        .iosApps,
     ]
 
     static let defaultRiskyActions: [ActionName] = [
@@ -584,6 +600,13 @@ public extension ActionName {
         .systemConfirmationResolve,
         .remotePair,
         .remoteRevoke,
+        .iosTap,
+        .iosSwipe,
+        .iosType,
+        .iosButton,
+        .iosLaunch,
+        .iosTerminate,
+        .iosUrl,
     ]
 }
 
