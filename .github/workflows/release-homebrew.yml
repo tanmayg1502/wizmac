@@ -23,6 +23,9 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      PUBLIC_RELEASES_REPO: tanmayg1502/wizmac-releases
+      HOMEBREW_TAP_REPO: tanmayg1502/homebrew-wizmac
+      CROSS_REPO_PAT: ${{ secrets.CROSS_REPO_PAT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -100,3 +103,75 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: .build/package/Wizmac.zip
+
+      - name: Compute release asset checksum
+        if: ${{ github.ref_type == 'tag' && env.CROSS_REPO_PAT != '' }}
+        id: checksum
+        run: |
+          sha=$(shasum -a 256 .build/package/Wizmac.zip | awk '{print $1}')
+          echo "value=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish public Homebrew binary release
+        if: ${{ github.ref_type == 'tag' && env.CROSS_REPO_PAT != '' }}
+        env:
+          GH_TOKEN: ${{ env.CROSS_REPO_PAT }}
+        run: |
+          tag="v${{ steps.version.outputs.value }}"
+          repo="$PUBLIC_RELEASES_REPO"
+          notes="Public Wizmac binary distribution for Homebrew tap."
+
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" .build/package/Wizmac.zip --repo "$repo" --clobber
+          else
+            gh release create "$tag" .build/package/Wizmac.zip --repo "$repo" --title "$tag" --notes "$notes"
+          fi
+
+      - name: Update public Homebrew tap formula
+        if: ${{ github.ref_type == 'tag' && env.CROSS_REPO_PAT != '' }}
+        env:
+          GH_TOKEN: ${{ env.CROSS_REPO_PAT }}
+        run: |
+          tag="v${{ steps.version.outputs.value }}"
+          sha="${{ steps.checksum.outputs.value }}"
+          tap_dir="$RUNNER_TEMP/homebrew-wizmac"
+          formula_path="$tap_dir/Formula/wizmac.rb"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" "$tap_dir"
+
+          cat >"$formula_path" <<EOF
+          class Wizmac < Formula
+            desc "Shared macOS automation service and CLI"
+            homepage "https://github.com/tanmayg1502/wizmac-releases"
+            url "https://github.com/tanmayg1502/wizmac-releases/releases/download/${tag}/Wizmac.zip"
+            sha256 "${sha}"
+            license "MIT"
+
+            depends_on macos: ">= :ventura"
+
+            def install
+              bin.install "Wizmac.app/Contents/Resources/bin/wizmac"
+              bin.install "Wizmac.app/Contents/MacOS/WizmacService"
+            end
+
+            service do
+              run [opt_bin/"WizmacService"]
+              keep_alive true
+            end
+
+            test do
+              system bin/"wizmac", "help"
+              assert_predicate bin/"WizmacService", :exist?
+              assert_predicate bin/"WizmacService", :executable?
+            end
+          end
+          EOF
+
+          git -C "$tap_dir" config user.name "github-actions[bot]"
+          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tap_dir" add Formula/wizmac.rb
+          if git -C "$tap_dir" diff --cached --quiet; then
+            echo "No formula changes to commit."
+            exit 0
+          fi
+          git -C "$tap_dir" commit -m "Update wizmac formula to ${tag}"
+          git -C "$tap_dir" push origin HEAD:main

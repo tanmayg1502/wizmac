@@ -82,6 +82,33 @@ Tagged releases must be signed and notarized. If they are not, macOS may show a 
 
 This repo also includes [.github/workflows/release-homebrew.yml](../.github/workflows/release-homebrew.yml), which automates the same flow on tag pushes when the signing and notarization secrets are configured.
 
+When `CROSS_REPO_PAT` is also configured, the same workflow will:
+
+- publish the notarized `Wizmac.zip` to the public binary repo at `tanmayg1502/wizmac-releases`
+- update the public tap formula in `tanmayg1502/homebrew-wizmac` to the new tag and SHA-256
+
+The cask in the public tap already points at `releases/latest/download/Wizmac.zip`, so it does not need a per-release version bump.
+
+### Required Secrets
+
+Signed and notarized tagged releases require:
+
+- `DEVELOPER_ID_APPLICATION`
+- `MACOS_SIGNING_CERT_BASE64`
+- `MACOS_SIGNING_CERT_PASSWORD`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
+
+Cross-repo publishing also requires:
+
+- `CROSS_REPO_PAT`
+
+`CROSS_REPO_PAT` should be a GitHub personal access token with write access to:
+
+- `tanmayg1502/wizmac-releases`
+- `tanmayg1502/homebrew-wizmac`
+
 ## Validation
 
 For a local packaging check, run:
