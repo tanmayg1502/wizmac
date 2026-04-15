@@ -231,6 +231,108 @@ struct CGScrollEventPerformer: ScrollEventPerforming {
     }
 }
 
+/// Protocol for burst-mode CG event execution.
+/// Posts an array of event specs in a tight loop with configurable inter-event
+/// and stabilization delays, dramatically reducing overhead vs one-at-a-time posting.
+protocol BurstEventPerforming {
+    func executeBurst(_ specs: [CGEventSpec], interEventDelayMs: Int, stabilizationDelayMs: Int) async -> Bool
+}
+
+struct CGBurstEventPerformer: BurstEventPerforming {
+    let pointer: PointerAutomationPerforming
+    let keyboard: KeyboardAutomationPerforming
+    let scroll: ScrollEventPerforming
+
+    func executeBurst(
+        _ specs: [CGEventSpec],
+        interEventDelayMs: Int = 2,
+        stabilizationDelayMs: Int = 25
+    ) async -> Bool {
+        for (index, spec) in specs.enumerated() {
+            let ok = dispatchEvent(spec)
+            guard ok else { return false }
+
+            if index < specs.count - 1, interEventDelayMs > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(interEventDelayMs) * 1_000_000)
+            }
+        }
+
+        if stabilizationDelayMs > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(stabilizationDelayMs) * 1_000_000)
+        }
+
+        return true
+    }
+
+    private func dispatchEvent(_ spec: CGEventSpec) -> Bool {
+        switch spec.kind {
+        case .pointerMove:
+            guard let point = spec.point else { return false }
+            return pointer.move(to: point)
+
+        case .pointerClick:
+            guard let point = spec.point else { return false }
+            let clickState = spec.clickState ?? 1
+            let button = spec.button ?? .left
+            return pointer.click(at: point, clickState: clickState, button: button)
+
+        case .pointerDoubleClick:
+            guard let point = spec.point else { return false }
+            let button = spec.button ?? .left
+            let first = pointer.click(at: point, clickState: 1, button: button)
+            guard first else { return false }
+            return pointer.click(at: point, clickState: 2, button: button)
+
+        case .pointerRightClick:
+            guard let point = spec.point else { return false }
+            let clickState = spec.clickState ?? 1
+            return pointer.click(at: point, clickState: clickState, button: .right)
+
+        case .pointerDrag:
+            guard let start = spec.point, let end = spec.endPoint else { return false }
+            let steps = spec.dragSteps ?? 8
+            return pointer.drag(from: start, to: end, steps: steps)
+
+        case .keyDown:
+            guard let keyCode = spec.keyCode else { return false }
+            return postKeyEvent(keyCode: keyCode, keyDown: true, characters: spec.characters, modifiers: spec.modifiers)
+
+        case .keyUp:
+            guard let keyCode = spec.keyCode else { return false }
+            return postKeyEvent(keyCode: keyCode, keyDown: false, characters: spec.characters, modifiers: spec.modifiers)
+
+        case .scrollWheel:
+            guard let direction = spec.scrollDirection else { return false }
+            let amount = spec.scrollAmount ?? 3
+            let point = spec.point ?? .zero
+            return scroll.scroll(direction: direction, amount: amount, at: point)
+        }
+    }
+
+    private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, characters: String?, modifiers: CGEventFlags?) -> Bool {
+        guard let cgEvent = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: keyCode,
+            keyDown: keyDown
+        ) else {
+            return false
+        }
+
+        if let modifiers {
+            cgEvent.flags = modifiers
+        }
+        if let characters, !characters.isEmpty {
+            let unicodeScalars = Array(characters.utf16)
+            cgEvent.keyboardSetUnicodeString(
+                stringLength: unicodeScalars.count,
+                unicodeString: unicodeScalars
+            )
+        }
+        cgEvent.post(tap: .cghidEventTap)
+        return true
+    }
+}
+
 public struct FocusedTextCapture: @unchecked Sendable {
     public var element: AXUIElement?
     public var context: TextContextSnapshot

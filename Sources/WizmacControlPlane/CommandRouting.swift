@@ -377,13 +377,9 @@ public actor ControlPlaneDispatcher {
             )
         }
 
+        // Accept any maxParallel value but currently execute sequentially (future-proofing)
         let maxParallel = max(arguments["maxParallel"]?.intValue ?? 1, 1)
-        guard maxParallel == 1 else {
-            return ControlPlaneActionResponse(
-                status: .invalidRequest,
-                message: "batch.run currently supports only --max-parallel 1."
-            )
-        }
+        _ = maxParallel  // Reserved for future parallel execution
 
         let failFast = arguments["continueOnError"]?.boolValue == true
             ? false
@@ -436,7 +432,7 @@ public actor ControlPlaneDispatcher {
                 batchAmbient: batchAmbient,
                 nextStepAmbient: nextStepAmbient
             )
-            let resolvedArguments = mergedBatchArguments(
+            var resolvedArguments = mergedBatchArguments(
                 inheritedContext: inheritedContext,
                 explicitArguments: step.arguments,
                 snapshotReuse: snapshotReuse
@@ -461,6 +457,30 @@ public actor ControlPlaneDispatcher {
                 )
                 if failFast { break }
                 continue
+            }
+
+            // Determine if this step should get fast-path optimization
+            let isFastPathStep: Bool = {
+                let isMutation = BatchPlanRunner.isMutation(step.action)
+                guard isMutation else { return false }
+                // Check if next step is also a mutation
+                let nextIndex = index + 1
+                guard nextIndex < stepValues.count else { return false }
+                guard let nextStep = batchStep(from: stepValues[nextIndex]) else { return false }
+                return BatchPlanRunner.isMutation(nextStep.action)
+            }()
+
+            if isFastPathStep {
+                resolvedArguments["_batchFastPath"] = .bool(true)
+                if resolvedArguments["postState"] == nil {
+                    resolvedArguments["postState"] = .string("none")
+                }
+                if resolvedArguments["preDelayMs"] == nil {
+                    resolvedArguments["preDelayMs"] = .number(0)
+                }
+                if resolvedArguments["postDelayMs"] == nil {
+                    resolvedArguments["postDelayMs"] = .number(0)
+                }
             }
 
             let startedAt = Date()
@@ -495,6 +515,7 @@ public actor ControlPlaneDispatcher {
                     "start": .string(encoder.string(from: startedAt)),
                     "end": .string(encoder.string(from: endedAt)),
                     "durationMs": .number(durationMs),
+                    "fastPath": .bool(isFastPathStep),
                     "request": .object([
                         "action": .string(step.action),
                         "arguments": .object(resolvedArguments),

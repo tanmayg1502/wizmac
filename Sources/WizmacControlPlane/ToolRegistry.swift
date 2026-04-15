@@ -56,6 +56,8 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "activate": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "adapter": .string("string"),
+                "waitTimeoutMs": .string("number"),
+                "pollIntervalMs": .string("number"),
             ]
         ),
         .schemaBacked(
@@ -76,6 +78,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "postDelayMs": .string("number"),
                 "timeoutMs": .string("number"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -96,13 +99,14 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "postDelayMs": .string("number"),
                 "timeoutMs": .string("number"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
         .schemaBacked(
             name: "batch.run",
             title: "Run Batch Flow",
-            description: "Run a sequential batch of control-plane steps with step timing, cache, and failure reporting.",
+            description: "Run an optimized batch of control-plane steps. Consecutive mutation steps are fast-pathed (skipping post-state refresh and inter-step delays) for dramatically faster execution. Supports step timing, cache policies, and failure reporting.",
             schemaProperties: [
                 "steps": .string("array"),
                 "file": .string("string"),
@@ -123,6 +127,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "adapter": .string("string"),
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
+                "stabilizationDelayMs": .string("number"),
             ]
         ),
         .schemaBacked(
@@ -152,6 +157,9 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "adapter": .string("string"),
+                "waitTimeoutMs": .string("number"),
+                "pollIntervalMs": .string("number"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -173,6 +181,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -669,6 +678,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "activate": .string("boolean"),
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
+                "_batchFastPath": .string("boolean"),
             ]
         ),
         .schemaBacked(
@@ -704,6 +714,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -728,6 +739,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -752,6 +764,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "trustedSessionID": .string("string"),
                 "debugTimings": .string("boolean"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -885,6 +898,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),
@@ -919,6 +933,7 @@ public struct ControlPlaneToolRegistry: Sendable {
                 "autoTrust": .string("boolean"),
                 "debugTimings": .string("boolean"),
                 "trustedSessionID": .string("string"),
+                "_batchFastPath": .string("boolean"),
             ],
             requiresConfirmation: true
         ),

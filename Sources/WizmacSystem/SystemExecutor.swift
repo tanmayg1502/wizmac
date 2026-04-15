@@ -542,6 +542,40 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             )
         }
 
+        let waitTimeoutMs = request.int(for: "waitTimeoutMs") ?? 0
+        let pollIntervalMs = request.int(for: "pollIntervalMs") ?? 250
+
+        if searchResult.snapshot.targets.isEmpty, waitTimeoutMs > 0 {
+            if let polledResult = await pollForSearchResult(
+                query: query,
+                pid: pid,
+                limit: limit,
+                scope: scope,
+                includeMenus: includeMenus,
+                currentSettings: currentSettings,
+                request: request,
+                waitTimeoutMs: waitTimeoutMs,
+                pollIntervalMs: pollIntervalMs
+            ) {
+                let payload = uiSearchPayload(polledResult, includeDebugTimings: debugTimingsRequested(for: request))
+                return ActionResult(
+                    requestID: request.id,
+                    action: request.action,
+                    outcome: .success,
+                    message: "Found \(polledResult.snapshot.targets.count) UI target(s).",
+                    payload: payload
+                )
+            }
+            let payload = uiSearchPayload(searchResult, includeDebugTimings: debugTimingsRequested(for: request))
+            return ActionResult(
+                requestID: request.id,
+                action: request.action,
+                outcome: .notFound,
+                message: "Timed out waiting for UI target.",
+                payload: payload
+            )
+        }
+
         let payload = uiSearchPayload(searchResult, includeDebugTimings: debugTimingsRequested(for: request))
         return ActionResult(
             requestID: request.id,
@@ -708,6 +742,40 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             targetLookup: UITargetLookupResult(target: firstTarget, metrics: searchResult.metrics),
             failure: nil
         )
+    }
+
+    private func pollForSearchResult(
+        query: String,
+        pid: pid_t?,
+        limit: Int,
+        scope: UISearchScope,
+        includeMenus: Bool,
+        currentSettings: WizmacSettings,
+        request: ActionRequest,
+        waitTimeoutMs: Int,
+        pollIntervalMs: Int
+    ) async -> UISearchResult? {
+        let startedAt = Date()
+        while Int(Date().timeIntervalSince(startedAt) * 1000) < waitTimeoutMs {
+            await sleeper.sleep(milliseconds: pollIntervalMs)
+            let result = snapshotter.search(
+                query: query,
+                pid: pid,
+                labelAlphabet: currentSettings.labelAlphabet,
+                limit: limit,
+                sessionID: nil,
+                scope: scope,
+                includeMenus: includeMenus
+            )
+            guard let result else {
+                // Permission or permanent failure — don't keep polling.
+                return nil
+            }
+            if !result.snapshot.targets.isEmpty {
+                return result
+            }
+        }
+        return nil
     }
 
     private func inferredTargetID(from query: String) -> String? {
@@ -933,13 +1001,43 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             return unresolvedApplicationResult(for: request, app: unresolvedApp)
         }
         let pid = resolvedApplication.pid
-        let targetResolution = resolveUITarget(
+        let waitTimeoutMs = request.int(for: "waitTimeoutMs") ?? 0
+        let pollIntervalMs = request.int(for: "pollIntervalMs") ?? 250
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+
+        var targetResolution = resolveUITarget(
             for: request,
             resolvedApplication: resolvedApplication,
             currentSettings: currentSettings
         )
         if let failure = targetResolution.failure {
-            return failure
+            if failure.outcome == .notFound, waitTimeoutMs > 0 {
+                let startedAt = Date()
+                while Int(Date().timeIntervalSince(startedAt) * 1000) < waitTimeoutMs {
+                    await sleeper.sleep(milliseconds: pollIntervalMs)
+                    targetResolution = resolveUITarget(
+                        for: request,
+                        resolvedApplication: resolvedApplication,
+                        currentSettings: currentSettings
+                    )
+                    if targetResolution.failure == nil {
+                        break
+                    }
+                    if targetResolution.failure?.outcome != .notFound {
+                        return targetResolution.failure!
+                    }
+                }
+                if targetResolution.failure != nil {
+                    return ActionResult(
+                        requestID: request.id,
+                        action: request.action,
+                        outcome: .notFound,
+                        message: "Timed out waiting for UI target."
+                    )
+                }
+            } else {
+                return failure
+            }
         }
         guard let targetLookup = targetResolution.targetLookup else {
             return ActionResult(
@@ -952,7 +1050,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
 
         let interaction = request.string(for: "interaction") ?? "press"
         let startedAt = Date()
-        await applyPreMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         let success = performInteraction(
             interaction,
             on: targetLookup.target,
@@ -960,17 +1060,24 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             labelAlphabet: currentSettings.labelAlphabet,
             request: request
         )
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
         let actionMs = Date().timeIntervalSince(startedAt) * 1_000
         let postStateStartedAt = Date()
-        let postState = success
-            ? await postActionStatePayload(
-                for: request,
-                pid: pid,
-                labelAlphabet: currentSettings.labelAlphabet,
-                currentSessionID: targetLookup.metrics.sessionID
-            )
-            : nil
+        let postState: JSONValue?
+        if batchFastPath {
+            postState = nil
+        } else {
+            postState = success
+                ? await postActionStatePayload(
+                    for: request,
+                    pid: pid,
+                    labelAlphabet: currentSettings.labelAlphabet,
+                    currentSessionID: targetLookup.metrics.sessionID
+                )
+                : nil
+        }
         let postActionRefreshMs = postState == nil ? 0 : Date().timeIntervalSince(postStateStartedAt) * 1_000
         var payload = baseTargetPayload(
             targetLookup: targetLookup,
@@ -1619,9 +1726,14 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
 
         let direction = request.string(for: "direction") ?? "down"
         let amount = request.int(for: "amount") ?? 3
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         let success = scrollController.step(direction: direction, amount: amount, snapshot: snapshot)
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
 
         return ActionResult(
             requestID: request.id,
@@ -2235,7 +2347,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
         if let failure = targetResolution.failure {
             return failure
         }
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         if let targetLookup = targetResolution.targetLookup {
             let didFocus = performInteraction(
                 "press",
@@ -2277,7 +2392,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
         }
 
         let submitResult = submit ? postReturnKey() : true
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
         let postCapture = focusedTextBridge.captureFocusedContext()
         let expectationsSatisfied = textInsertExpectationsSatisfied(
             request: request,
@@ -2657,9 +2774,14 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
         let modifiers = descriptor.modifiers.union(resolvedKey.implicitModifiers)
         let events = keyPressEvents(for: resolvedKey, modifiers: modifiers)
 
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         let success = keyboardPerformer.post(events: events)
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
 
         return ActionResult(
             requestID: request.id,
@@ -2703,7 +2825,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
             )
         }
 
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         var success = true
         var eventCount = 0
         for step in parsedSteps {
@@ -2718,7 +2843,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
                 await sleeper.sleep(milliseconds: step.delayAfterMs)
             }
         }
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
 
         return ActionResult(
             requestID: request.id,
@@ -2823,7 +2950,10 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
         let segmentCount = max(1, min(8, durationMs > 0 ? Int(ceil(Double(durationMs) / 120.0)) : 1))
         let interSegmentDelay = segmentCount > 1 ? max(durationMs / segmentCount, 1) : 0
 
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         var success = true
         for index in 0..<segmentCount {
             let amount = totalAmount / segmentCount + (index < (totalAmount % segmentCount) ? 1 : 0)
@@ -2834,7 +2964,9 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
                 await sleeper.sleep(milliseconds: interSegmentDelay)
             }
         }
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
 
         return ActionResult(
             requestID: request.id,
@@ -2906,9 +3038,14 @@ final class MacAutomationExecutor: @unchecked Sendable, ApprovalPreparingActionE
         let start = CGPoint(x: startX, y: center.y)
         let end = CGPoint(x: endX, y: center.y)
 
-        await applyPreMutationDelay(for: request)
+        let batchFastPath = request.bool(for: "_batchFastPath") ?? false
+        if !batchFastPath {
+            await applyPreMutationDelay(for: request)
+        }
         let success = pointerPerformer.drag(from: start, to: end, steps: steps)
-        await applyPostMutationDelay(for: request)
+        if !batchFastPath {
+            await applyPostMutationDelay(for: request)
+        }
 
         return ActionResult(
             requestID: request.id,
