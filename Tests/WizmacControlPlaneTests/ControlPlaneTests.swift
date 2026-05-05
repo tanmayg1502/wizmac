@@ -226,6 +226,87 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(requests.last?.arguments["trustedSessionID"]?.stringValue, "trusted-1")
     }
 
+    func testDispatcherImplicitlyAutoTrustsLocalAppScopedMutation() async throws {
+        let router = RecordingControlPlaneRouter()
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: router)
+
+        let response = await dispatcher.callTool(
+            named: "ui.act",
+            arguments: [
+                "targetID": .string("button-1"),
+                "pid": .number(3255),
+            ],
+            source: ControlPlaneSource(kind: .cli)
+        )
+
+        let requests = await router.recordedRequests()
+
+        XCTAssertEqual(response.status, .success)
+        XCTAssertEqual(requests.map(\.toolName), ["system.trusted_session_start", "ui.act"])
+        XCTAssertEqual(requests.first?.arguments["pid"]?.intValue, 3255)
+        XCTAssertEqual(requests.last?.arguments["trustedSessionID"]?.stringValue, "trusted-1")
+    }
+
+    func testDispatcherImplicitlyAutoTrustsLocalWindowScopedMutation() async throws {
+        let router = RecordingControlPlaneRouter()
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: router)
+
+        let response = await dispatcher.callTool(
+            named: "window.focus",
+            arguments: [
+                "targetID": .string("window-1"),
+                "windowID": .number(78),
+            ],
+            source: ControlPlaneSource(kind: .cli)
+        )
+
+        let requests = await router.recordedRequests()
+
+        XCTAssertEqual(response.status, .success)
+        XCTAssertEqual(requests.map(\.toolName), ["system.trusted_session_start", "window.focus"])
+        XCTAssertEqual(requests.last?.arguments["trustedSessionID"]?.stringValue, "trusted-1")
+    }
+
+    func testDispatcherDoesNotImplicitlyAutoTrustFrontmostMutation() async throws {
+        let router = RecordingControlPlaneRouter()
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: router)
+
+        let response = await dispatcher.callTool(
+            named: "ui.act",
+            arguments: [
+                "targetID": .string("button-1"),
+            ],
+            source: ControlPlaneSource(kind: .cli)
+        )
+
+        let requests = await router.recordedRequests()
+
+        XCTAssertEqual(response.status, .success)
+        XCTAssertEqual(requests.map(\.toolName), ["ui.act"])
+        XCTAssertNil(requests.last?.arguments["trustedSessionID"]?.stringValue)
+    }
+
+    func testDispatcherRespectsExplicitAutoTrustOptOutForAppScopedMutation() async throws {
+        let router = RecordingControlPlaneRouter()
+        let dispatcher = ControlPlaneDispatcher(registry: .default, router: router)
+
+        let response = await dispatcher.callTool(
+            named: "ui.act",
+            arguments: [
+                "targetID": .string("button-1"),
+                "app": .string("Arc"),
+                "autoTrust": .bool(false),
+            ],
+            source: ControlPlaneSource(kind: .cli)
+        )
+
+        let requests = await router.recordedRequests()
+
+        XCTAssertEqual(response.status, .success)
+        XCTAssertEqual(requests.map(\.toolName), ["ui.act"])
+        XCTAssertNil(requests.last?.arguments["trustedSessionID"]?.stringValue)
+    }
+
     func testCoreBackedRouterPropagatesRemoteSourceIntoCoreRequest() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -355,10 +355,12 @@ Important rule:
 
 This only happens when:
 
-- `autoTrust=true`
 - `trustedSessionID` is not already present
 - the source is local (`cli`, `mcp`, or `menuBar`)
 - the action is in `TrustedAutomationPolicy.defaultAllowedActions`
+- and either:
+  - `autoTrust=true`, or
+  - the request already names a specific app, PID, or window
 
 If the trusted-session bootstrap succeeds, the dispatcher injects the new `trustedSessionID` into the original request.
 

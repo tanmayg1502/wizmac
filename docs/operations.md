@@ -186,7 +186,10 @@ End a session:
 swift run wizmac system trusted_session_end --trustedSessionID <uuid>
 ```
 
-Or let the dispatcher do it automatically with `autoTrust=true` on eligible local tool calls.
+Or let the dispatcher do it automatically on eligible local tool calls:
+
+- explicitly with `autoTrust=true`
+- or implicitly for local mutation requests that already target a specific app, PID, or window
 
 ## Local Transport Reality Check
 

@@ -96,8 +96,8 @@ The public tool inventory lives in `ControlPlaneToolRegistry`.
 `ControlPlaneDispatcher` translates tool calls into `ControlPlaneActionRequest`, handles JSON-RPC methods like `tools/list` and `resources/read`, and can auto-start a trusted local automation session when:
 
 - the request is local (`cli`, `mcp`, or `menuBar`)
-- `autoTrust=true`
 - the action is allowed by `TrustedAutomationPolicy.defaultAllowedActions`
+- either `autoTrust=true` is set explicitly, or the request is already scoped to a specific app, PID, or window
 
 ### 3. Service routing
 

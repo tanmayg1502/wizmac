@@ -168,9 +168,6 @@ public actor ControlPlaneDispatcher {
         guard request.toolName != ActionName.systemTrustedSessionStart.rawValue else {
             return request
         }
-        guard request.arguments["autoTrust"]?.boolValue == true else {
-            return request
-        }
         guard request.arguments["trustedSessionID"] == nil else {
             return request
         }
@@ -180,6 +177,9 @@ public actor ControlPlaneDispatcher {
         guard let action = ActionName(rawValue: request.toolName),
               TrustedAutomationPolicy.defaultAllowedActions.contains(action)
         else {
+            return request
+        }
+        guard shouldAttemptAutoTrust(for: request) else {
             return request
         }
         guard let trustedSessionRequest = registry.request(
@@ -204,6 +204,32 @@ public actor ControlPlaneDispatcher {
             arguments: arguments,
             source: request.source
         )
+    }
+
+    private func shouldAttemptAutoTrust(for request: ControlPlaneActionRequest) -> Bool {
+        if let explicitAutoTrust = request.arguments["autoTrust"]?.boolValue {
+            return explicitAutoTrust
+        }
+
+        return hasExplicitAppScope(request.arguments)
+    }
+
+    private func hasExplicitAppScope(_ arguments: [String: StructuredValue]) -> Bool {
+        if let pid = arguments["pid"]?.intValue, pid > 0 {
+            return true
+        }
+
+        if let windowID = arguments["windowID"]?.intValue, windowID > 0 {
+            return true
+        }
+
+        if let app = arguments["app"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+           app.isEmpty == false
+        {
+            return true
+        }
+
+        return false
     }
 
     private func trustedSessionStartArguments(
